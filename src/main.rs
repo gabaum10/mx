@@ -1071,7 +1071,8 @@ enum MemoryCommands {
         resonance_type: Option<String>,
 
         /// Surface all resonance types (blooms, patterns, insights, decisions, ephemeral, etc.)
-        /// instead of ephemeral-only. Ignored if --resonance-type is set.
+        /// instead of ephemeral-only. Can be combined with --resonance-type to query all types,
+        /// then filter to a specific type.
         #[arg(long)]
         all_types: bool,
 
@@ -3981,6 +3982,14 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
+            // Validate --sort value early so unknown values fail loudly.
+            if sort != "chronological" && sort != "resonance" {
+                bail!(
+                    "Invalid --sort value '{}'. Valid values: chronological, resonance",
+                    sort
+                );
+            }
+
             // Warn when resonance-dependent flags are used with the SQLite backend,
             // which hardcodes resonance: 0 and has no decay computation.
             let is_sqlite = !matches!(
@@ -4000,7 +4009,16 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             //   --all-types           => query all resonance types (takes priority)
             //   (default)             => ephemeral only (backwards compatible)
             // --resonance-type filter is applied post-query in both cases.
-            let mut facts = if all_types {
+            //
+            // Auto-imply --all-types when --resonance-type is set to a non-ephemeral value.
+            // Without this, the default ephemeral-only query would return zero results for
+            // types like "foundational" or "transformative" because they would never match.
+            let ephemeral_types = ["ephemeral", "session"];
+            let effective_all_types = all_types
+                || resonance_type
+                    .as_deref()
+                    .is_some_and(|rt| !ephemeral_types.contains(&rt));
+            let mut facts = if effective_all_types {
                 db.query_recent_facts_all_types(days)?
             } else {
                 db.query_recent_facts(days)?
