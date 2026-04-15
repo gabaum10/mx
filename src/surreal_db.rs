@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use surrealdb::RecordId as SurrealRecordId;
 use surrealdb::Surreal;
 use surrealdb::engine::local::SurrealKv;
-use surrealdb::engine::remote::ws::{Client as WsClient, Ws};
+use surrealdb::engine::remote::ws::{Client as WsClient, Ws, Wss};
 use surrealdb::opt::auth::{Database, Namespace, Root};
 use surrealdb::sql::{Thing, Value};
 use tokio::runtime::Runtime;
@@ -558,18 +558,36 @@ impl SurrealDatabase {
             eprintln!("[mx] WARNING: Consider using wss:// (TLS) for secure authentication");
         }
 
-        // Strip protocol prefix from URL - surrealdb crate expects just host:port
+        // Strip protocol prefix from URL - surrealdb crate expects just host:port.
+        // We lose the scheme in the sanitized form, so detect it up front to
+        // pick the right engine (plain Ws vs TLS Wss).
+        let is_tls = config.url.starts_with("wss://");
         let sanitized_url = Self::sanitize_ws_url(&config.url);
 
-        // Connect to remote SurrealDB via WebSocket
-        let db = Surreal::new::<Ws>(sanitized_url.as_str())
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to connect to SurrealDB at {} (check that server is running and URL is correct)",
-                    config.url
-                )
-            })?;
+        // Connect to remote SurrealDB via WebSocket. Dispatch on scheme:
+        // `Ws` speaks plain WebSocket; `Wss` is the TLS variant (enabled by
+        // the `rustls` feature on the surrealdb crate). Using the wrong one
+        // fails with a cryptic "HTTP version must be 1.1 or higher" because
+        // the TLS handshake bytes get parsed as HTTP.
+        let db = if is_tls {
+            Surreal::new::<Wss>(sanitized_url.as_str())
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to connect to SurrealDB at {} (check that server is running and URL is correct)",
+                        config.url
+                    )
+                })?
+        } else {
+            Surreal::new::<Ws>(sanitized_url.as_str())
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to connect to SurrealDB at {} (check that server is running and URL is correct)",
+                        config.url
+                    )
+                })?
+        };
 
         // Authenticate with the server
         // If no password is provided, attempt connection without auth (will fail if server requires it)
@@ -3158,6 +3176,57 @@ impl SurrealDatabase {
         Self::runtime().block_on(self.list_by_category_async(category, ctx, filter))
     }
 
+    /// Fast count of entries in a category with the same visibility / resonance
+    /// filtering as list_by_category, but returning only the integer count —
+    /// no row hydration, no tag/applicability follow-up queries. Used by
+    /// `mx memory stats` so it doesn't round-trip thousands of times per call
+    /// when the db is remote.
+    pub fn count_by_category(
+        &self,
+        category: &str,
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+    ) -> Result<usize> {
+        Self::runtime().block_on(self.count_by_category_async(category, ctx, filter))
+    }
+
+    async fn count_by_category_async(
+        &self,
+        category: &str,
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+    ) -> Result<usize> {
+        let category_thing = Thing::from(("category", category));
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+        let resonance_clause = Self::build_resonance_filter(filter);
+
+        // NOTE: `SELECT count() FROM knowledge WHERE ... GROUP ALL` returns
+        // the wrong number in SurrealDB 2.6 when a WHERE clause is present
+        // (observed on 2.6.1: bloom with visibility='public' reports 986
+        // instead of 260 — off by ~3-4x, seemingly counting some join
+        // product). Wrapping the filter in a subquery that projects id only
+        // gives the correct count and still avoids row hydration.
+        let sql = format!(
+            "SELECT count() AS c FROM (
+                SELECT id FROM knowledge
+                WHERE category = $category {} {}
+            ) GROUP ALL",
+            visibility_clause, resonance_clause
+        );
+
+        let mut response = with_db!(self, db, {
+            let mut query = db.query(&sql).bind(("category", category_thing));
+            if let Some(agent) = current_agent {
+                query = query.bind(("current_agent", agent));
+            }
+            query.await.context("Failed to count knowledge by category")
+        })?;
+
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        let count = results.first().and_then(|v| v["c"].as_i64()).unwrap_or(0) as usize;
+        Ok(count)
+    }
+
     async fn list_by_category_async(
         &self,
         category: &str,
@@ -3639,6 +3708,15 @@ impl KnowledgeStore for SurrealDatabase {
         filter: &crate::store::KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>> {
         self.list_by_category(category, ctx, filter)
+    }
+
+    fn count_by_category(
+        &self,
+        category: &str,
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+    ) -> Result<usize> {
+        self.count_by_category(category, ctx, filter)
     }
 
     fn list_all(&self, ctx: &crate::store::AgentContext) -> Result<Vec<KnowledgeEntry>> {
