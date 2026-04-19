@@ -548,6 +548,27 @@ enum MemoryCommands {
         json: bool,
     },
 
+    /// Show graph health vitality percentages (embedding coverage, anchor coverage, stale high-res entries)
+    Health {
+        /// Output as JSON (default format for dashboard consumers)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show per-week entry growth over the last 8 weeks as a JSON array
+    Growth {
+        /// Output as JSON array of 8 integers (oldest to newest)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List open threads (category:thread entries with state="open" or no state)
+    OpenThreads {
+        /// Output as JSON array (required for dashboard consumers)
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Delete an entry from the index
     Delete {
         /// Entry ID to delete
@@ -2536,6 +2557,68 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 for cat in categories {
                     let count = db.list_by_category(&cat.id, &ctx, &filter)?.len();
                     println!("  {:12} {}", cat.id, count);
+                }
+            }
+        }
+
+        MemoryCommands::Health { json } => {
+            let surreal_path = config.db_path.with_extension("surreal");
+            let db = crate::surreal_db::SurrealDatabase::open_with_verbose(surreal_path, verbose)?;
+            let health = db.graph_health()?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&health)?);
+            } else {
+                let total = health["total"].as_i64().unwrap_or(0);
+                let embedded_pct = health["embedded_pct"].as_i64().unwrap_or(0);
+                let anchored_pct = health["anchored_pct"].as_i64().unwrap_or(0);
+                let stale_pct = health["stale_high_res_pct"].as_i64().unwrap_or(0);
+                println!("Graph Health\n");
+                println!("  Total entries: {}", total);
+                println!("  {:3}% embedded", embedded_pct);
+                println!("  {:3}% anchored", anchored_pct);
+                println!("  {:3}% stale (high-res, >30d)", stale_pct);
+            }
+        }
+
+        MemoryCommands::Growth { json } => {
+            let surreal_path = config.db_path.with_extension("surreal");
+            let db = crate::surreal_db::SurrealDatabase::open_with_verbose(surreal_path, verbose)?;
+            let counts = db.growth_sparkline()?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&counts)?);
+            } else {
+                // Human-readable: label + bar
+                println!("Growth (last 8 weeks)");
+                if let Some(arr) = counts.as_array() {
+                    for (i, v) in arr.iter().enumerate() {
+                        println!("  week -{}: {}", 7 - i, v.as_i64().unwrap_or(0));
+                    }
+                }
+            }
+        }
+
+        MemoryCommands::OpenThreads { json } => {
+            let surreal_path = config.db_path.with_extension("surreal");
+            let db = crate::surreal_db::SurrealDatabase::open_with_verbose(surreal_path, verbose)?;
+            let threads = db.open_threads()?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&threads)?);
+            } else {
+                let arr = threads.as_array().map(|v| v.as_slice()).unwrap_or(&[]);
+                if arr.is_empty() {
+                    println!("No open threads.");
+                } else {
+                    println!("Open threads ({})\n", arr.len());
+                    for t in arr {
+                        let id = t["id"].as_str().unwrap_or("");
+                        let resonance = t["resonance"].as_i64().unwrap_or(0);
+                        let created_at = t["created_at"].as_str().unwrap_or("");
+                        let body = t["body"].as_str().unwrap_or("").chars().take(80).collect::<String>();
+                        println!("  [r{}] {} {}  {}", resonance, id, created_at, body);
+                    }
                 }
             }
         }

@@ -2966,6 +2966,230 @@ impl SurrealDatabase {
         Ok(count)
     }
 
+    /// Graph health vitality percentages.
+    ///
+    /// Returns a JSON object:
+    ///   { "total": N, "embedded": N, "anchored": N, "stale_high_res": N,
+    ///     "embedded_pct": N, "anchored_pct": N, "stale_high_res_pct": N }
+    ///
+    /// Counts:
+    ///   embedded      — entries with a non-null embedding vector
+    ///   anchored      — entries with at least one anchor relationship
+    ///   stale_high_res — high-resonance entries (resonance >= 5) not activated
+    ///                   in the last 30 days (potentially stale knowledge)
+    pub fn graph_health(&self) -> Result<serde_json::Value> {
+        Self::runtime().block_on(self.graph_health_async())
+    }
+
+    async fn graph_health_async(&self) -> Result<serde_json::Value> {
+        let mut response = with_db!(self, db, {
+            db.query(
+                "SELECT
+                    count() AS total,
+                    count(embedding IS NOT NONE) AS embedded,
+                    count(anchors IS NOT NONE AND array::len(anchors) > 0) AS anchored,
+                    count(last_activated < time::now() - duration::from::days(30) AND resonance >= 5) AS stale_high_res
+                FROM knowledge GROUP ALL",
+            )
+            .await
+            .context("Failed to query graph health")
+        })?;
+
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        let row = results.into_iter().next().unwrap_or_default();
+
+        let total = row["total"].as_i64().unwrap_or(0);
+        let embedded = row["embedded"].as_i64().unwrap_or(0);
+        let anchored = row["anchored"].as_i64().unwrap_or(0);
+        let stale_high_res = row["stale_high_res"].as_i64().unwrap_or(0);
+
+        let pct = |n: i64| -> i64 {
+            if total == 0 { 0 } else { (n * 100 + total / 2) / total }
+        };
+
+        Ok(serde_json::json!({
+            "total": total,
+            "embedded": embedded,
+            "anchored": anchored,
+            "stale_high_res": stale_high_res,
+            "embedded_pct": pct(embedded),
+            "anchored_pct": pct(anchored),
+            "stale_high_res_pct": pct(stale_high_res),
+        }))
+    }
+
+    /// Per-week entry counts over the last 8 weeks (oldest to newest).
+    ///
+    /// Returns a JSON array of up to 8 integers.  Weeks with no entries are
+    /// represented as 0.  The array is always exactly 8 elements, padded with
+    /// leading zeros when fewer than 8 weeks of data exist.
+    pub fn growth_sparkline(&self) -> Result<serde_json::Value> {
+        Self::runtime().block_on(self.growth_sparkline_async())
+    }
+
+    async fn growth_sparkline_async(&self) -> Result<serde_json::Value> {
+        // Aggregated GROUP BY approach.
+        // Uses the same duration syntax as the working recent-facts queries.
+        // GROUP BY on the projected alias.
+        let results: Vec<serde_json::Value> = {
+            let mut response = with_db!(self, db, {
+                db.query(
+                    "SELECT
+                        (<int>time::unix(<datetime>created_at) / 604800) AS week_bucket,
+                        count() AS cnt
+                    FROM knowledge
+                    WHERE created_at > time::now() - duration::from::days(56)
+                    GROUP BY week_bucket
+                    ORDER BY week_bucket",
+                )
+                .await
+                .context("Failed to query growth sparkline")
+            })?;
+            response.take(0).unwrap_or_default()
+        };
+
+        // Build a sorted map from week_bucket -> count
+        let mut bucket_map: std::collections::BTreeMap<i64, i64> = std::collections::BTreeMap::new();
+        for row in &results {
+            let bucket = row["week_bucket"].as_i64().unwrap_or(0);
+            let cnt = row["cnt"].as_i64().unwrap_or(0);
+            bucket_map.insert(bucket, cnt);
+        }
+
+        // Fill 8 contiguous buckets ending at current week
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let current_bucket = now_secs / 604800;
+
+        let counts: Vec<i64> = (0i64..8)
+            .map(|offset| {
+                let bucket = current_bucket - (7 - offset);
+                *bucket_map.get(&bucket).unwrap_or(&0)
+            })
+            .collect();
+
+        Ok(serde_json::json!(counts))
+    }
+
+    /// Open threads: knowledge entries with category:thread that are not closed.
+    ///
+    /// Returns a JSON array sorted by decay-weighted score (resonance * 0.95^weeks_old),
+    /// newest/highest-resonance first.  Each element contains the fields the dashboard
+    /// thread widget needs: id, body, state, created_at, resonance, tags.
+    ///
+    /// Open = summary IS NONE OR summary.state IS NONE OR summary.state = "open"
+    pub fn open_threads(&self) -> Result<serde_json::Value> {
+        Self::runtime().block_on(self.open_threads_async())
+    }
+
+    async fn open_threads_async(&self) -> Result<serde_json::Value> {
+        let mut response = with_db!(self, db, {
+            db.query(
+                "SELECT
+                    meta::id(id) AS id,
+                    body,
+                    summary,
+                    <string>created_at AS created_at,
+                    resonance,
+                    ->tagged_with->tag.name AS tags
+                FROM knowledge
+                WHERE category = category:thread
+                  AND (summary IS NONE OR summary.state IS NONE OR summary.state = 'open')
+                ORDER BY created_at DESC",
+            )
+            .await
+            .context("Failed to query open threads")
+        })?;
+
+        let rows: Vec<serde_json::Value> = response.take(0).unwrap_or_default();
+
+        // Parse state from summary JSON; build output with stable shape
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as f64)
+            .unwrap_or(0.0);
+
+        let mut threads: Vec<serde_json::Value> = rows
+            .into_iter()
+            .filter_map(|row| {
+                let id = row["id"].as_str().unwrap_or("").to_string();
+                if id.is_empty() {
+                    return None;
+                }
+
+                let summary_raw = &row["summary"];
+                let state = if summary_raw.is_null() || summary_raw.is_string() && summary_raw.as_str().unwrap_or("").is_empty() {
+                    "open".to_string()
+                } else {
+                    let s: serde_json::Value = if let Some(s) = summary_raw.as_str() {
+                        serde_json::from_str(s).unwrap_or(serde_json::Value::Null)
+                    } else {
+                        summary_raw.clone()
+                    };
+                    s.get("state")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("open")
+                        .to_string()
+                };
+
+                // After DB-side WHERE filter this should always be "open", but guard anyway
+                if state != "open" {
+                    return None;
+                }
+
+                let resonance = row["resonance"].as_i64().unwrap_or(0);
+                let created_at = row["created_at"].as_str().unwrap_or("").to_string();
+                let tags = row["tags"].clone();
+
+                Some(serde_json::json!({
+                    "id": format!("kn-{}", id),
+                    "body": row["body"],
+                    "state": state,
+                    "created_at": created_at,
+                    "resonance": resonance,
+                    "tags": tags,
+                    // Include decay score for client-side sort verification
+                    "_score": Self::decay_score(resonance, &created_at, now_secs),
+                }))
+            })
+            .collect();
+
+        // Sort by decay-weighted score descending
+        threads.sort_by(|a, b| {
+            let sa = a["_score"].as_f64().unwrap_or(0.0);
+            let sb = b["_score"].as_f64().unwrap_or(0.0);
+            sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Strip the internal _score field before returning
+        for t in &mut threads {
+            if let Some(obj) = t.as_object_mut() {
+                obj.remove("_score");
+            }
+        }
+
+        Ok(serde_json::json!(threads))
+    }
+
+    /// Decay-weighted score: resonance * 0.95^weeks_old
+    fn decay_score(resonance: i64, created_at: &str, now_secs: f64) -> f64 {
+        let created_secs = chrono::DateTime::parse_from_rfc3339(
+            &created_at.replace('Z', "+00:00"),
+        )
+        .map(|dt| dt.timestamp() as f64)
+        .unwrap_or(0.0);
+
+        let weeks = if created_secs > 0.0 {
+            (now_secs - created_secs) / (7.0 * 86400.0)
+        } else {
+            0.0
+        };
+
+        resonance as f64 * 0.95_f64.powf(weeks)
+    }
+
     /// List all knowledge entries
     pub fn list_all(&self, ctx: &crate::store::AgentContext) -> Result<Vec<KnowledgeEntry>> {
         Self::runtime().block_on(self.list_all_async(ctx))
