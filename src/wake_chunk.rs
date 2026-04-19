@@ -507,11 +507,22 @@ fn first_sentence(content: &str) -> Option<String> {
 }
 
 fn first_non_empty_line(content: &str) -> Option<String> {
-    content
-        .lines()
-        .map(|l| l.trim())
-        .find(|l| !l.is_empty())
-        .map(|l| l.to_string())
+    let mut in_fence = false;
+    for line in content.lines() {
+        let trimmed_start = line.trim_start();
+        if trimmed_start.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
 }
 
 fn synthetic_phrase(content: &str, chunk_idx: u16, total: u16) -> String {
@@ -637,6 +648,130 @@ pub fn normalize_derived(s: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+// ============================================================================
+// extract_auto_phrase — four-tier cascade for phraseless blooms (mx#218)
+// ============================================================================
+
+/// Extract a wake phrase from content for a chunk that has neither authored
+/// nor derived phrases. This is the mx#218 auto-phrase: ensures every chunk
+/// in every bloom has a phrase so the 3-attempt + reveal engagement flow
+/// applies universally — no bloom can be `--skip`'d without engagement.
+///
+/// Four-tier cascade:
+///
+/// 1. **First markdown heading** (outside fenced code blocks).
+/// 2. **Content-hash-seeded sentence selection** — deterministic but varies
+///    across blooms (same content = same phrase, different content = different
+///    sentence selected).
+/// 3. **First non-empty line** truncated to ~80 chars.
+/// 4. **Title fallback** — bloom title as the phrase (guaranteed non-empty).
+///
+/// The function is total: non-empty `title` → non-empty output, always.
+pub fn extract_auto_phrase(content: &str, title: &str) -> String {
+    // Tier 1: first markdown heading outside fenced code blocks.
+    if let Some(heading) = first_heading(content) {
+        return cap_chars(heading.trim(), PHRASE_MAX_CHARS);
+    }
+
+    // Tier 2: content-hash-seeded sentence selection.
+    let sentences = extract_sentences(content);
+    if !sentences.is_empty() {
+        let refs: Vec<&str> = sentences.iter().map(|s| s.as_str()).collect();
+        let idx = select_sentence_index(&refs, content);
+        let s = sentences[idx].trim();
+        if !s.is_empty() {
+            return cap_chars(s, SENTENCE_MAX_CHARS);
+        }
+    }
+
+    // Tier 3: first non-empty line truncated.
+    if let Some(line) = first_non_empty_line(content) {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            return cap_chars(trimmed, LINE_FALLBACK_MAX_CHARS);
+        }
+    }
+
+    // Tier 4: title fallback (guaranteed non-empty by caller contract).
+    cap_chars(title.trim(), PHRASE_MAX_CHARS)
+}
+
+/// Split content into sentences. A sentence boundary is:
+/// - `. ` followed by an uppercase letter or end-of-content
+/// - `\n\n` (paragraph break)
+///
+/// Returns non-empty trimmed sentences. Skips content inside fenced code
+/// blocks to avoid picking code comments as sentences.
+fn extract_sentences(content: &str) -> Vec<String> {
+    let mut sentences = Vec::new();
+    let mut current = String::new();
+    let mut in_fence = false;
+
+    for line in content.lines() {
+        let trimmed_start = line.trim_start();
+        if trimmed_start.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+
+        if line.trim().is_empty() {
+            // Paragraph break — flush current sentence.
+            let trimmed = current.trim().to_string();
+            if !trimmed.is_empty() {
+                sentences.push(trimmed);
+            }
+            current.clear();
+            continue;
+        }
+
+        // Strip markdown list-item prefixes so warmth-brick lines like
+        // "- kautau noticed the pattern" don't keep the `- ` artifact.
+        let mut cleaned = line.trim();
+        if let Some(rest) = cleaned.strip_prefix("- ") {
+            cleaned = rest;
+        } else if let Some(rest) = cleaned.strip_prefix("* ") {
+            cleaned = rest;
+        }
+
+        // Append line to current accumulator, separated by space.
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(cleaned);
+
+        // Check for `. ` sentence boundaries within the accumulated text.
+        // Split greedily on `. ` — each fragment before the last is a sentence.
+        while let Some(pos) = current.find(". ") {
+            let sentence = current[..=pos].trim().to_string(); // include the period
+            if !sentence.is_empty() {
+                sentences.push(sentence);
+            }
+            current = current[pos + 2..].to_string();
+        }
+    }
+
+    // Flush remaining.
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        sentences.push(trimmed);
+    }
+
+    sentences
+}
+
+/// Deterministic sentence index selection based on content hash. Same
+/// content always selects the same sentence, but different blooms select
+/// different sentences — prevents memorization of "always first sentence."
+fn select_sentence_index(sentences: &[&str], content: &str) -> usize {
+    let seed: u64 = content
+        .bytes()
+        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+    seed as usize % sentences.len()
 }
 
 // ============================================================================
@@ -1234,5 +1369,245 @@ mod tests {
                 PhraseMatch::Exact
             );
         }
+    }
+
+    // --- extract_auto_phrase unit tests (mx#218) ---------------------------------
+
+    #[test]
+    fn auto_phrase_from_heading() {
+        let content = "Some intro text.\n\n## The Spark\n\nBody text here.";
+        let p = extract_auto_phrase(content, "Fallback Title");
+        assert_eq!(p, "The Spark");
+    }
+
+    #[test]
+    fn auto_phrase_from_sentence() {
+        // No heading — should fall through to sentence selection.
+        let content = "The warmth accumulator stores relational bricks. Each brick records a moment of connection.";
+        let p = extract_auto_phrase(content, "Warmth Accumulator");
+        // Must be one of the two sentences, deterministically selected.
+        assert!(
+            p.contains("warmth accumulator") || p.contains("brick records"),
+            "expected a sentence from the content, got {:?}",
+            p
+        );
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn auto_phrase_from_line() {
+        // No headings, no sentence terminators — falls to first non-empty line.
+        let content = "- brick one: kautau noticed the pattern\n- brick two: something else";
+        let p = extract_auto_phrase(content, "Fallback");
+        assert!(
+            p.contains("brick one"),
+            "expected first line as phrase, got {:?}",
+            p
+        );
+    }
+
+    #[test]
+    fn auto_phrase_from_title_fallback() {
+        // Empty content — must fall back to title.
+        let p = extract_auto_phrase("", "Warmth Accumulator");
+        assert_eq!(p, "Warmth Accumulator");
+    }
+
+    #[test]
+    fn auto_phrase_never_empty() {
+        // Non-empty title always produces a non-empty phrase.
+        let cases = ["", " ", "\n", "\n\n", "\t\t"];
+        for c in cases {
+            let p = extract_auto_phrase(c, "Title");
+            assert!(!p.is_empty(), "empty auto-phrase for content {:?}", c);
+        }
+    }
+
+    #[test]
+    fn auto_phrase_deterministic() {
+        let content = "Some paragraph with multiple sentences. Another one here. And a third.";
+        let a = extract_auto_phrase(content, "Title");
+        let b = extract_auto_phrase(content, "Title");
+        assert_eq!(a, b, "auto-phrase must be deterministic");
+    }
+
+    #[test]
+    fn auto_phrase_skips_fenced_headings() {
+        // Heading inside a code block must not be selected.
+        let content = "```markdown\n## Fake Heading\n```\n\nReal first sentence here.";
+        let p = extract_auto_phrase(content, "Title");
+        assert!(
+            !p.contains("Fake Heading"),
+            "auto-phrase picked heading inside fenced block: {:?}",
+            p
+        );
+    }
+
+    #[test]
+    fn auto_phrase_warmth_bricks() {
+        // A list of `- ` prefixed bricks with no heading or sentence boundaries.
+        let content = "- kautau noticed the pattern and said so\n- Q remembered the first wake\n- Semvii brought coffee";
+        let p = extract_auto_phrase(content, "Warmth Accumulator");
+        // Should pick a brick line (first non-empty line tier or sentence tier).
+        assert!(
+            p.contains("kautau") || p.contains("Q remembered") || p.contains("Semvii"),
+            "expected a brick line, got {:?}",
+            p
+        );
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn auto_phrase_content_hash_varies_across_blooms() {
+        // Different content should (usually) select different sentences.
+        // Not a hard guarantee (hash collisions exist) but for these two
+        // distinct inputs the seed should differ.
+        let content_a = "First sentence here. Second sentence here. Third sentence here.";
+        let content_b = "Alpha sentence here. Beta sentence here. Gamma sentence here.";
+        let p_a = extract_auto_phrase(content_a, "A");
+        let p_b = extract_auto_phrase(content_b, "B");
+        // They CAN be the same index by coincidence, but the phrases themselves
+        // will differ because the content differs.
+        assert_ne!(
+            p_a, p_b,
+            "different content should produce different phrases"
+        );
+    }
+
+    // --- extract_sentences unit tests ---
+
+    #[test]
+    fn extract_sentences_basic() {
+        let content = "First sentence. Second sentence. Third.";
+        let sentences = extract_sentences(content);
+        assert!(
+            sentences.len() >= 2,
+            "expected >=2 sentences, got {:?}",
+            sentences
+        );
+        assert!(sentences[0].contains("First sentence."));
+    }
+
+    #[test]
+    fn extract_sentences_paragraph_break() {
+        let content = "Paragraph one\n\nParagraph two";
+        let sentences = extract_sentences(content);
+        assert_eq!(sentences.len(), 2);
+        assert_eq!(sentences[0], "Paragraph one");
+        assert_eq!(sentences[1], "Paragraph two");
+    }
+
+    #[test]
+    fn extract_sentences_skips_fenced_blocks() {
+        let content = "Real sentence.\n\n```\nFake sentence inside code.\n```\n\nAnother real one.";
+        let sentences = extract_sentences(content);
+        for s in &sentences {
+            assert!(
+                !s.contains("Fake sentence"),
+                "sentence extractor should skip fenced blocks, got {:?}",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn select_sentence_index_deterministic() {
+        let sentences = vec!["a", "b", "c", "d", "e"];
+        let content = "some content for hashing";
+        let idx1 = select_sentence_index(&sentences, content);
+        let idx2 = select_sentence_index(&sentences, content);
+        assert_eq!(idx1, idx2);
+        assert!(idx1 < sentences.len());
+    }
+
+    #[test]
+    fn select_sentence_index_varies_with_content() {
+        let sentences = vec!["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
+        let idx1 = select_sentence_index(&sentences, "content alpha");
+        let idx2 = select_sentence_index(&sentences, "content beta");
+        // With 10 choices and different seeds, these should differ.
+        // Not a hard guarantee but very likely with this hash function.
+        assert_ne!(
+            idx1, idx2,
+            "different content should usually select different indices"
+        );
+    }
+
+    // --- first_non_empty_line fence-skip tests (Diffi review #221 fix 2) ---
+
+    #[test]
+    fn first_non_empty_line_skips_fenced_code_block() {
+        // Content that starts with a fenced code block — the first non-empty
+        // line outside the fence should be returned, not "```rust".
+        let content = "```rust\nfn main() {}\n```\n\nActual first line.";
+        let line = first_non_empty_line(content);
+        assert_eq!(
+            line.as_deref(),
+            Some("Actual first line."),
+            "should skip fenced code block, got {:?}",
+            line
+        );
+    }
+
+    #[test]
+    fn first_non_empty_line_all_fenced_returns_none() {
+        // If the entire content is inside a code fence, no non-empty line
+        // exists outside of it.
+        let content = "```\nonly code here\nmore code\n```";
+        let line = first_non_empty_line(content);
+        assert_eq!(line, None, "all-fenced content should return None");
+    }
+
+    #[test]
+    fn first_non_empty_line_between_fences() {
+        let content = "```\ncode\n```\n\nSandwiched line\n\n```\nmore code\n```";
+        let line = first_non_empty_line(content);
+        assert_eq!(line.as_deref(), Some("Sandwiched line"));
+    }
+
+    // --- extract_sentences list-item stripping tests (Diffi review #221 fix 5) ---
+
+    #[test]
+    fn extract_sentences_strips_dash_list_prefix() {
+        let content = "- first brick line\n- second brick line";
+        let sentences = extract_sentences(content);
+        for s in &sentences {
+            assert!(
+                !s.starts_with("- "),
+                "sentence should not keep `- ` prefix: {:?}",
+                s
+            );
+        }
+        // The two lines join into one sentence (no paragraph break or `. `).
+        assert!(!sentences.is_empty());
+        assert!(
+            sentences[0].contains("first brick line"),
+            "expected content without prefix, got {:?}",
+            sentences
+        );
+    }
+
+    #[test]
+    fn extract_sentences_strips_star_list_prefix() {
+        let content = "* item alpha\n* item beta";
+        let sentences = extract_sentences(content);
+        for s in &sentences {
+            assert!(
+                !s.starts_with("* "),
+                "sentence should not keep `* ` prefix: {:?}",
+                s
+            );
+        }
+        assert!(!sentences.is_empty());
+        assert!(sentences[0].contains("item alpha"));
+    }
+
+    #[test]
+    fn extract_sentences_list_items_with_paragraph_breaks() {
+        let content = "- first item\n\n- second item";
+        let sentences = extract_sentences(content);
+        assert_eq!(sentences.len(), 2);
+        assert_eq!(sentences[0], "first item");
+        assert_eq!(sentences[1], "second item");
     }
 }
