@@ -1691,7 +1691,7 @@ impl SurrealDatabase {
         let mut anchor_ids: Vec<String> = core
             .iter()
             .chain(recent.iter())
-            .map(|e| e.id.strip_prefix("kn-").unwrap_or(&e.id).to_string())
+            .map(|e| e.id.clone())
             .collect();
 
         // Deduplicate anchor IDs
