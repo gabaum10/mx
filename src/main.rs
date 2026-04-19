@@ -2616,7 +2616,12 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         let id = t["id"].as_str().unwrap_or("");
                         let resonance = t["resonance"].as_i64().unwrap_or(0);
                         let created_at = t["created_at"].as_str().unwrap_or("");
-                        let body = t["body"].as_str().unwrap_or("").chars().take(80).collect::<String>();
+                        let body = t["body"]
+                            .as_str()
+                            .unwrap_or("")
+                            .chars()
+                            .take(80)
+                            .collect::<String>();
                         println!("  [r{}] {} {}  {}", resonance, id, created_at, body);
                     }
                 }

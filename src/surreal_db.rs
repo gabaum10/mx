@@ -3004,7 +3004,11 @@ impl SurrealDatabase {
         let stale_high_res = row["stale_high_res"].as_i64().unwrap_or(0);
 
         let pct = |n: i64| -> i64 {
-            if total == 0 { 0 } else { (n * 100 + total / 2) / total }
+            if total == 0 {
+                0
+            } else {
+                (n * 100 + total / 2) / total
+            }
         };
 
         Ok(serde_json::json!({
@@ -3049,7 +3053,8 @@ impl SurrealDatabase {
         };
 
         // Build a sorted map from week_bucket -> count
-        let mut bucket_map: std::collections::BTreeMap<i64, i64> = std::collections::BTreeMap::new();
+        let mut bucket_map: std::collections::BTreeMap<i64, i64> =
+            std::collections::BTreeMap::new();
         for row in &results {
             let bucket = row["week_bucket"].as_i64().unwrap_or(0);
             let cnt = row["cnt"].as_i64().unwrap_or(0);
@@ -3120,7 +3125,9 @@ impl SurrealDatabase {
                 }
 
                 let summary_raw = &row["summary"];
-                let state = if summary_raw.is_null() || summary_raw.is_string() && summary_raw.as_str().unwrap_or("").is_empty() {
+                let state = if summary_raw.is_null()
+                    || summary_raw.is_string() && summary_raw.as_str().unwrap_or("").is_empty()
+                {
                     "open".to_string()
                 } else {
                     let s: serde_json::Value = if let Some(s) = summary_raw.as_str() {
@@ -3175,11 +3182,9 @@ impl SurrealDatabase {
 
     /// Decay-weighted score: resonance * 0.95^weeks_old
     fn decay_score(resonance: i64, created_at: &str, now_secs: f64) -> f64 {
-        let created_secs = chrono::DateTime::parse_from_rfc3339(
-            &created_at.replace('Z', "+00:00"),
-        )
-        .map(|dt| dt.timestamp() as f64)
-        .unwrap_or(0.0);
+        let created_secs = chrono::DateTime::parse_from_rfc3339(&created_at.replace('Z', "+00:00"))
+            .map(|dt| dt.timestamp() as f64)
+            .unwrap_or(0.0);
 
         let weeks = if created_secs > 0.0 {
             (now_secs - created_secs) / (7.0 * 86400.0)

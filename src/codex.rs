@@ -463,11 +463,7 @@ pub fn search_archives(pattern: String, json: bool) -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "Warning: could not read {}: {}",
-                        source_file.display(),
-                        e
-                    );
+                    eprintln!("Warning: could not read {}: {}", source_file.display(), e);
                 }
             }
         }
@@ -494,11 +490,7 @@ pub fn search_archives(pattern: String, json: bool) -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "Warning: could not read {}: {}",
-                        source_file.display(),
-                        e
-                    );
+                    eprintln!("Warning: could not read {}: {}", source_file.display(), e);
                 }
             }
         }
