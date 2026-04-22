@@ -452,6 +452,13 @@ macro_rules! with_db {
     };
 }
 
+/// Helper for SELECT-based existence checks on `relates_to` edges.
+/// Used by both `delete_relationship_by_id_async` and `delete_relationship_async`.
+#[derive(Debug, Deserialize)]
+struct ExistsRow {
+    id: String,
+}
+
 impl SurrealDatabase {}
 
 impl SurrealDatabase {
@@ -2550,7 +2557,7 @@ impl SurrealDatabase {
         let rel_type_thing = Thing::from(("relationship_type", rel_type));
 
         with_db!(self, db, {
-            db.query("RELATE $from->relates_to->$to SET relationship_type = $rel_type")
+            db.query("RELATE $from->relates_to->$to SET relationship_type = $rel_type, created_at = time::now()")
                 .bind(("from", from_thing))
                 .bind(("to", to_thing))
                 .bind(("rel_type", rel_type_thing))
@@ -2580,7 +2587,8 @@ impl SurrealDatabase {
             from_entry_id: String,
             to_entry_id: String,
             relationship_type: String,
-            created_at: String,
+            #[serde(default)]
+            created_at: Option<String>,
         }
 
         let mut response = with_db!(self, db, {
@@ -2607,7 +2615,7 @@ impl SurrealDatabase {
                 from_entry_id: format!("kn-{}", row.from_entry_id),
                 to_entry_id: format!("kn-{}", row.to_entry_id),
                 relationship_type: row.relationship_type,
-                created_at: row.created_at,
+                created_at: row.created_at.unwrap_or_else(|| "unknown".to_string()),
             })
             .collect();
 
@@ -2628,11 +2636,10 @@ impl SurrealDatabase {
         // SurrealDB's RETURN BEFORE yields Thing-typed fields that serde_json cannot
         // round-trip. Instead: SELECT with meta::id() to check existence, then DELETE
         // without a RETURN clause (which is safe to take as Vec<Value> empty).
-        #[derive(Debug, Deserialize)]
-        struct ExistsRow {
-            id: String,
-        }
-
+        //
+        // NOTE: There is a TOCTOU window between the SELECT and DELETE — the edge
+        // could be deleted by another caller between the two queries.  This is
+        // acceptable for a single-user CLI tool where concurrent mutation is rare.
         let mut check = with_db!(self, db, {
             db.query("SELECT meta::id(id) AS id FROM relates_to WHERE meta::id(id) = $id LIMIT 1")
                 .bind(("id", id.to_string()))
@@ -2671,11 +2678,6 @@ impl SurrealDatabase {
         // SurrealDB's RETURN BEFORE yields Thing-typed fields that serde_json cannot
         // round-trip. Check existence with meta::id() SELECT first, then DELETE without
         // a RETURN clause to avoid the deserialization error.
-        #[derive(Debug, Deserialize)]
-        struct ExistsRow {
-            id: String,
-        }
-
         let mut check = with_db!(self, db, {
             db.query(
                 "SELECT meta::id(id) AS id FROM relates_to
