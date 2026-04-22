@@ -3443,7 +3443,21 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     "session_id: {:?} -> {}",
                     entry.session_id, normalized
                 ));
-                entry.session_id = Some(normalized);
+                entry.session_id = Some(normalized.clone());
+
+                // Create EXTRACTED_FROM edge, mirroring the add path logic.
+                // The for-session query traverses the relates_to edge, so we
+                // need both the field AND the edge for consistency.
+                let session_ref = normalized;
+                let edge_ctx = crate::store::AgentContext::public_only();
+                if db.get(&session_ref, &edge_ctx)?.is_none() {
+                    eprintln!(
+                        "Warning: Session {} not found - EXTRACTED_FROM edge not created",
+                        session_ref
+                    );
+                } else {
+                    db.add_relationship(&id, &session_ref, "extracted_from")?;
+                }
             }
 
             // Update timestamp
