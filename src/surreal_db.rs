@@ -2986,9 +2986,9 @@ impl SurrealDatabase {
             db.query(
                 "SELECT
                     count() AS total,
-                    count(embedding IS NOT NONE) AS embedded,
-                    count(anchors IS NOT NONE AND array::len(anchors) > 0) AS anchored,
-                    count(last_activated < time::now() - duration::from::days(30) AND resonance >= 5) AS stale_high_res
+                    math::sum(IF embedding IS NOT NONE THEN 1 ELSE 0 END) AS embedded,
+                    math::sum(IF anchors IS NOT NONE AND array::len(anchors) > 0 THEN 1 ELSE 0 END) AS anchored,
+                    math::sum(IF (last_activated IS NONE OR last_activated < time::now() - duration::from::days(30)) AND resonance >= 5 THEN 1 ELSE 0 END) AS stale_high_res
                 FROM knowledge GROUP ALL",
             )
             .await
@@ -3061,7 +3061,10 @@ impl SurrealDatabase {
             bucket_map.insert(bucket, cnt);
         }
 
-        // Fill 8 contiguous buckets ending at current week
+        // Fill 8 contiguous buckets ending at current week.
+        // Note: dividing unix seconds by 604800 yields epoch-relative weeks
+        // whose boundaries fall on Thursday 00:00 UTC (since the Unix epoch
+        // was a Thursday).  The alignment is arbitrary but consistent.
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -3141,7 +3144,10 @@ impl SurrealDatabase {
                         .to_string()
                 };
 
-                // After DB-side WHERE filter this should always be "open", but guard anyway
+                // Defensive: the DB-side WHERE already filters to open threads, but
+                // summary can be a raw JSON string that needs client-side parsing
+                // (see the deserialisation dance above), so we re-check here in case
+                // the parsed state diverges from what SurrealQL evaluated.
                 if state != "open" {
                     return None;
                 }
@@ -3181,16 +3187,17 @@ impl SurrealDatabase {
     }
 
     /// Decay-weighted score: resonance * 0.95^weeks_old
+    ///
+    /// If `created_at` cannot be parsed, we treat the entry as maximally old
+    /// (52 weeks) so it sinks to the bottom rather than floating to the top
+    /// with zero decay.
     fn decay_score(resonance: i64, created_at: &str, now_secs: f64) -> f64 {
-        let created_secs = chrono::DateTime::parse_from_rfc3339(&created_at.replace('Z', "+00:00"))
-            .map(|dt| dt.timestamp() as f64)
-            .unwrap_or(0.0);
-
-        let weeks = if created_secs > 0.0 {
-            (now_secs - created_secs) / (7.0 * 86400.0)
-        } else {
-            0.0
-        };
+        let weeks = chrono::DateTime::parse_from_rfc3339(&created_at.replace('Z', "+00:00"))
+            .map(|dt| {
+                let created_secs = dt.timestamp() as f64;
+                (now_secs - created_secs) / (7.0 * 86400.0)
+            })
+            .unwrap_or(52.0);
 
         resonance as f64 * 0.95_f64.powf(weeks)
     }

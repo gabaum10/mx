@@ -2359,6 +2359,12 @@ fn auto_anchor(
     Ok(())
 }
 
+/// Open the SurrealDB graph database for the given config.
+fn open_surreal(config: &IndexConfig, verbose: bool) -> Result<crate::surreal_db::SurrealDatabase> {
+    let surreal_path = config.db_path.with_extension("surreal");
+    crate::surreal_db::SurrealDatabase::open_with_verbose(surreal_path, verbose)
+}
+
 fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
     let config = IndexConfig::default();
 
@@ -2562,8 +2568,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
         }
 
         MemoryCommands::Health { json } => {
-            let surreal_path = config.db_path.with_extension("surreal");
-            let db = crate::surreal_db::SurrealDatabase::open_with_verbose(surreal_path, verbose)?;
+            let db = open_surreal(&config, verbose)?;
             let health = db.graph_health()?;
 
             if json {
@@ -2582,8 +2587,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
         }
 
         MemoryCommands::Growth { json } => {
-            let surreal_path = config.db_path.with_extension("surreal");
-            let db = crate::surreal_db::SurrealDatabase::open_with_verbose(surreal_path, verbose)?;
+            let db = open_surreal(&config, verbose)?;
             let counts = db.growth_sparkline()?;
 
             if json {
@@ -2600,8 +2604,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
         }
 
         MemoryCommands::OpenThreads { json } => {
-            let surreal_path = config.db_path.with_extension("surreal");
-            let db = crate::surreal_db::SurrealDatabase::open_with_verbose(surreal_path, verbose)?;
+            let db = open_surreal(&config, verbose)?;
             let threads = db.open_threads()?;
 
             if json {

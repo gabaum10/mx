@@ -344,18 +344,13 @@ pub fn read_session(
         return Ok(());
     }
 
-    let session_file = archive_dir.join("session.jsonl");
-    let (content, is_clean_md) = if session_file.exists() {
-        (fs::read_to_string(&session_file)?, false)
-    } else {
-        let md = archive_dir.join("conversation.md");
-        if !md.exists() {
-            anyhow::bail!(
-                "No transcript found in archive (expected session.jsonl or conversation.md)"
-            );
-        }
-        (fs::read_to_string(&md)?, true)
-    };
+    let source_file = archive_source(&archive_dir).ok_or_else(|| {
+        anyhow::anyhow!(
+            "No transcript found in archive (expected conversation.md or session.jsonl)"
+        )
+    })?;
+    let is_clean_md = source_file.extension().and_then(|e| e.to_str()) == Some("md");
+    let content = fs::read_to_string(&source_file)?;
 
     if let Some(pattern) = grep_pattern {
         // Filter lines matching pattern — works identically on both formats
@@ -372,7 +367,10 @@ pub fn read_session(
         print!("{}", content);
     }
 
-    // Include agent transcripts if requested
+    // Include agent transcripts if requested.
+    // Agent transcripts are always stored as JSONL (even in clean-mode archives
+    // that use conversation.md for the main session), so we only look for .jsonl
+    // files in the agents/ directory.
     if include_agents {
         let agents_dir = archive_dir.join("agents");
         if agents_dir.exists() {
