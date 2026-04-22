@@ -344,29 +344,33 @@ pub fn read_session(
         return Ok(());
     }
 
-    let session_file = archive_dir.join("session.jsonl");
-    if !session_file.exists() {
-        anyhow::bail!("Session file not found in archive");
-    }
-
-    let content = fs::read_to_string(&session_file)?;
+    let source_file = archive_source(&archive_dir).ok_or_else(|| {
+        anyhow::anyhow!(
+            "No transcript found in archive (expected conversation.md or session.jsonl)"
+        )
+    })?;
+    let is_clean_md = source_file.extension().and_then(|e| e.to_str()) == Some("md");
+    let content = fs::read_to_string(&source_file)?;
 
     if let Some(pattern) = grep_pattern {
-        // Filter lines matching pattern
+        // Filter lines matching pattern — works identically on both formats
         for line in content.lines() {
             if line.contains(&pattern) {
                 println!("{}", line);
             }
         }
-    } else if human {
-        // Pretty-print human-readable format
+    } else if !is_clean_md && human {
+        // Pretty-print human-readable format (JSONL only)
         print_human_readable(&content)?;
     } else {
-        // Raw JSONL
+        // Raw output (JSONL) or clean markdown pass-through
         print!("{}", content);
     }
 
-    // Include agent transcripts if requested
+    // Include agent transcripts if requested.
+    // Agent transcripts are always stored as JSONL (even in clean-mode archives
+    // that use conversation.md for the main session), so we only look for .jsonl
+    // files in the agents/ directory.
     if include_agents {
         let agents_dir = archive_dir.join("agents");
         if agents_dir.exists() {
@@ -392,6 +396,21 @@ pub fn read_session(
     Ok(())
 }
 
+/// Pick the canonical transcript source for an archive directory.
+/// Prefers the clean markdown transcript (post-March-31 default), falls back
+/// to the raw JSONL for older archives.  Returns None when neither exists.
+fn archive_source(archive_dir: &Path) -> Option<PathBuf> {
+    let md = archive_dir.join("conversation.md");
+    if md.exists() {
+        return Some(md);
+    }
+    let jsonl = archive_dir.join("session.jsonl");
+    if jsonl.exists() {
+        return Some(jsonl);
+    }
+    None
+}
+
 /// Search all archives for a pattern
 pub fn search_archives(pattern: String, json: bool) -> Result<()> {
     let codex_dir = get_codex_dir()?;
@@ -407,47 +426,79 @@ pub fn search_archives(pattern: String, json: bool) -> Result<()> {
 
     let archives = collect_archives(&codex_dir)?;
 
+    let mut skipped: usize = 0;
+
     if json {
         let mut results = Vec::new();
         for archive in archives {
-            let session_file = codex_dir.join(&archive.dir_name).join("session.jsonl");
-            if let Ok(content) = fs::read_to_string(&session_file)
-                && content.contains(&pattern)
-            {
-                let matching_lines: Vec<serde_json::Value> = content
-                    .lines()
-                    .enumerate()
-                    .filter(|(_, line)| line.contains(&pattern))
-                    .map(|(i, line)| {
-                        serde_json::json!({
-                            "line": i + 1,
-                            "content": line,
-                        })
-                    })
-                    .collect();
-                results.push(serde_json::json!({
-                    "archive_id": archive.short_id,
-                    "file": session_file.display().to_string(),
-                    "matches": matching_lines,
-                }));
+            let archive_dir = codex_dir.join(&archive.dir_name);
+            let source_file = match archive_source(&archive_dir) {
+                Some(p) => p,
+                None => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            match fs::read_to_string(&source_file) {
+                Ok(content) => {
+                    if content.contains(&pattern) {
+                        let matching_lines: Vec<serde_json::Value> = content
+                            .lines()
+                            .enumerate()
+                            .filter(|(_, line)| line.contains(&pattern))
+                            .map(|(i, line)| {
+                                serde_json::json!({
+                                    "line": i + 1,
+                                    "content": line,
+                                })
+                            })
+                            .collect();
+                        results.push(serde_json::json!({
+                            "archive_id": archive.short_id,
+                            "file": source_file.display().to_string(),
+                            "matches": matching_lines,
+                        }));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: could not read {}: {}", source_file.display(), e);
+                }
             }
         }
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {
         for archive in archives {
-            let session_file = codex_dir.join(&archive.dir_name).join("session.jsonl");
-            if let Ok(content) = fs::read_to_string(&session_file)
-                && content.contains(&pattern)
-            {
-                println!("Match in {}: {}", archive.short_id, session_file.display());
-                // Print matching lines
-                for (i, line) in content.lines().enumerate() {
-                    if line.contains(&pattern) {
-                        println!("  Line {}: {}", i + 1, line);
+            let archive_dir = codex_dir.join(&archive.dir_name);
+            let source_file = match archive_source(&archive_dir) {
+                Some(p) => p,
+                None => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            match fs::read_to_string(&source_file) {
+                Ok(content) => {
+                    if content.contains(&pattern) {
+                        println!("Match in {}: {}", archive.short_id, source_file.display());
+                        for (i, line) in content.lines().enumerate() {
+                            if line.contains(&pattern) {
+                                println!("  Line {}: {}", i + 1, line);
+                            }
+                        }
                     }
+                }
+                Err(e) => {
+                    eprintln!("Warning: could not read {}: {}", source_file.display(), e);
                 }
             }
         }
+    }
+
+    if skipped > 0 {
+        eprintln!(
+            "searched archives, skipped {} (no transcript found)",
+            skipped
+        );
     }
 
     Ok(())
@@ -2143,6 +2194,79 @@ mod tests {
         assert!(
             map.is_empty(),
             "map should be empty when subagent_type is missing"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // archive_source: format-detection regression test
+    // Catches the silent-failure mode where clean-mode archives (conversation.md
+    // only) were invisible to search_archives because it only looked for
+    // session.jsonl.  If this test fails, the format-detection helper is broken.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn archive_source_prefers_clean_md_over_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let md_path = dir.path().join("conversation.md");
+        let jsonl_path = dir.path().join("session.jsonl");
+
+        // Only conversation.md present (clean-mode archive)
+        std::fs::write(&md_path, "# Conversation\n").unwrap();
+        let result = archive_source(dir.path()).unwrap();
+        assert_eq!(result, md_path, "should prefer conversation.md");
+
+        // Both present — still prefers conversation.md
+        std::fs::write(&jsonl_path, "{}\n").unwrap();
+        let result = archive_source(dir.path()).unwrap();
+        assert_eq!(
+            result, md_path,
+            "should prefer conversation.md when both exist"
+        );
+
+        // Only session.jsonl present (legacy archive)
+        std::fs::remove_file(&md_path).unwrap();
+        let result = archive_source(dir.path()).unwrap();
+        assert_eq!(result, jsonl_path, "should fall back to session.jsonl");
+
+        // Neither present — returns None
+        std::fs::remove_file(&jsonl_path).unwrap();
+        assert!(
+            archive_source(dir.path()).is_none(),
+            "should return None when no transcript exists"
+        );
+    }
+
+    #[test]
+    fn archive_source_real_archives_are_searchable() {
+        // Cross-reference rail: at least one real archive must be in the canonical
+        // format that archive_source can find.  This is the test that would have
+        // caught the asymmetric migration at CI time — the check that clean-mode
+        // archives are actually visible to the search path.
+        let codex_dir = match get_codex_dir() {
+            Ok(d) => d,
+            Err(_) => return, // codex dir not configured in this environment — skip
+        };
+        if !codex_dir.exists() {
+            return; // no archives yet — skip rather than fail
+        }
+        let archives = match collect_archives(&codex_dir) {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        if archives.is_empty() {
+            return; // nothing to check
+        }
+        let searchable = archives.iter().filter(|a| {
+            let archive_dir = codex_dir.join(&a.dir_name);
+            archive_source(&archive_dir).is_some()
+        });
+        assert!(
+            searchable.count() > 0,
+            "no archives are searchable — archive_source found neither \
+             conversation.md nor session.jsonl in any of the {} archive(s) \
+             under {:?}. search_archives would return zero results.",
+            archives.len(),
+            codex_dir
         );
     }
 }
