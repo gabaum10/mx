@@ -16,7 +16,6 @@ mod knowledge;
 mod kv;
 pub mod paths;
 mod session;
-mod state;
 mod store;
 mod surreal_db;
 mod sync;
@@ -33,7 +32,7 @@ use cli::*;
 use handlers::*;
 
 fn main() -> Result<()> {
-    paths::emit_mx_home_note();
+    paths::emit_legacy_memory_path_note();
 
     let cli = Cli::parse();
 
