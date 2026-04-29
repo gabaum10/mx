@@ -429,10 +429,14 @@ impl KvStore {
         let (schema_path, schema_warn) = Self::resolve_schema_path(&agent);
         let (data_path, data_warn) = Self::resolve_data_path(&agent);
 
-        // Single, consolidated stderr note when either resolver fell back to
-        // the legacy `~/.crewu/kv/` location -- gated on a per-process
-        // OnceLock so a single command never emits the warning twice.
-        if should_emit_legacy_kv_warning(schema_warn, data_warn, &LEGACY_KV_WARNING_EMITTED) {
+        // Suppress the legacy warning when resolved files live under MX_HOME --
+        // the user declared this directory as home, so files there with legacy
+        // naming aren't really "legacy."
+        let under_mx_home = schema_path.starts_with(crate::paths::mx_home())
+            && data_path.starts_with(crate::paths::mx_home());
+        if !under_mx_home
+            && should_emit_legacy_kv_warning(schema_warn, data_warn, &LEGACY_KV_WARNING_EMITTED)
+        {
             eprintln!("{}", LEGACY_KV_WARNING);
         }
 
