@@ -1185,9 +1185,27 @@ pub enum CodexCommands {
         #[arg(long)]
         clean: bool,
 
-        /// Include agent sub-session conversations in clean transcript
+        /// Include agent sub-session conversations in clean transcript.
+        ///
+        /// Requires `subagents` in `--include` (the default; if you pass
+        /// `--include none` or any value without `subagents`, this flag
+        /// will error at parse time rather than silently no-op).
         #[arg(long, requires = "clean")]
         include_agents: bool,
+
+        /// Comma-separated list of optional source artifacts to capture.
+        ///
+        /// Recognized: `subagents`, `mcp`, `tool-output`, `history`, `all`,
+        /// `none`. Today's default behavior corresponds to `--include
+        /// subagents`. The other tokens enable forthcoming source walkers
+        /// (MCP server logs, /tmp tool outputs, history.jsonl slice).
+        ///
+        /// Note: this flag governs which source files are *captured* into
+        /// the archive sidecars. The separate `--include-agents` flag
+        /// controls whether subagent transcripts are folded into the
+        /// `conversation.md` rendering when `--clean` is set.
+        #[arg(long, default_value = "subagents")]
+        include: String,
     },
 
     /// List archived sessions
