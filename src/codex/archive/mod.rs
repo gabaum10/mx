@@ -18,7 +18,7 @@
 //! `archive::run` is the one canonical entry point. The historical
 //! `save_session` is a thin wrapper that builds an `ArchiveRequest` from
 //! CLI args and calls `run`. Status-quo invocations
-//! (`mx codex archive` with no `--include`) produce byte-identical
+//! (`mx codex save` with no `--include`) produce byte-identical
 //! output to the pre-PR-2 implementation.
 
 use anyhow::Result;
@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use super::{ArchiveEntry, Manifest};
 
+mod backfill;
 mod include;
 mod paths;
 mod sources;
@@ -34,6 +35,7 @@ mod write;
 
 // Re-exports kept at the historical paths so `super::archive::*` callers
 // (notably `migrate.rs` and `read.rs`) need no changes.
+pub(crate) use backfill::run_backfill;
 pub(crate) use include::IncludeSet;
 pub(crate) use paths::{get_base_archive_name, parse_archive_name};
 
@@ -90,7 +92,7 @@ pub struct ArchiveResult {
 /// to `request` and `options`, returns a summary.
 ///
 /// Behavior with `IncludeSet::status_quo()` and `clean = false` is
-/// byte-identical to the pre-PR-2 `mx codex archive` flow.
+/// byte-identical to the pre-PR-2 `mx codex save` flow.
 ///
 /// After a successful write, the by-project index
 /// (`<codex_dir>/by-project/`) is rebuilt so subsequent reads can find
@@ -102,6 +104,13 @@ pub fn run(request: ArchiveRequest, options: ArchiveOptions) -> Result<ArchiveRe
 
     match request {
         ArchiveRequest::Single(path) => {
+            // NOTE: backfill.rs::session_id_from_path derives the dedup
+            // key from the JSONL filename stem. If we ever change how
+            // the canonical session_id is derived for a Single archive
+            // (e.g., from the JSONL's `sessionId` field instead of the
+            // filename), update backfill's dedup logic to match,
+            // otherwise idempotence will break silently. See W2 in PR
+            // 272 review for context.
             let archive_dir = write::archive_session(
                 &path,
                 options.clean,
