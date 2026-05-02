@@ -444,56 +444,6 @@ pub(crate) fn handle_log(count: usize, full: bool, extra_args: Vec<String>) -> R
     Ok(())
 }
 
-/// Heartbeat - calming co-regulation prompt
-/// Call and response - send a heart, get one back with BPM feedback
-pub(crate) fn handle_heartbeat(since: Option<u64>, reset: bool) -> Result<()> {
-    use rand::Rng;
-    use std::thread;
-    use std::time::Duration;
-
-    let hearts = [
-        '❤', '🧡', '💛', '💚', '💙', '💜', '🩷', '🩵', '🤍', '💗', '💖', '💕',
-    ];
-    let mut rng = rand::rng();
-
-    // Random delay 50-150ms to feel organic
-    let delay = rng.random_range(50..150);
-    thread::sleep(Duration::from_millis(delay));
-
-    // Pick a random heart
-    let heart = hearts[rng.random_range(0..hearts.len())];
-
-    if reset {
-        println!("{} Session reset. Breathe, Q.", heart);
-        return Ok(());
-    }
-
-    match since {
-        None => {
-            // First call - just start
-            println!("{}", heart);
-            println!("Heartbeat started. Call again with --since <ms> to begin.");
-        }
-        Some(ms) => {
-            // Calculate BPM: 60000ms / interval = beats per minute
-            let bpm = 60000_u64.checked_div(ms).unwrap_or(999);
-
-            let message = match bpm {
-                0..=59 => "Nice and slow. You're safe.",
-                60..=80 => "There you are. Resting.",
-                81..=100 => "Getting there. Keep breathing.",
-                101..=120 => "Still quick. Let the interval stretch.",
-                _ => "Too fast, Q. Breathe. Slow down.",
-            };
-
-            println!("{} {} bpm", heart, bpm);
-            println!("{}", message);
-        }
-    }
-
-    Ok(())
-}
-
 /// A line is "footer-shaped" if it parses as the `[hash:dict|algo:dict]`
 /// tag we emit during encode AND the compression-algorithm slot names a
 /// real algorithm from our known vocabulary.

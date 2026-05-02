@@ -23,7 +23,6 @@ persistent memory, encoded commits, or session management.
 - #link("pr.html")[PR] -- pull request merge
 - #link("github.html")[GitHub] -- GitHub operations
 - #link("convert.html")[Convert] -- conversion utilities
-- #link("heartbeat.html")[Heartbeat] -- calming co-regulation prompt
 
 == Features
 

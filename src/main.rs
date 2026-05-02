@@ -74,7 +74,6 @@ fn main() -> Result<()> {
         Commands::Session { command } => handle_session(command),
         Commands::Codex { command } => handle_codex(command),
         Commands::Convert { command } => handle_convert(command),
-        Commands::Heartbeat { since, reset } => handle_heartbeat(since, reset),
         Commands::Log { count, full, args } => handle_log(count, full, args),
         Commands::State { command } => handle_state(command),
         Commands::Kv { command } => {

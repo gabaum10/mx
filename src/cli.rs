@@ -102,17 +102,6 @@ pub enum Commands {
         command: ConvertCommands,
     },
 
-    /// Heartbeat - calming co-regulation prompt
-    Heartbeat {
-        /// Milliseconds since last heartbeat (for BPM calculation)
-        #[arg(long)]
-        since: Option<u64>,
-
-        /// Reset the heartbeat session
-        #[arg(long)]
-        reset: bool,
-    },
-
     /// Decoded git log (decodes encoded commit messages)
     Log {
         /// Number of commits to show
