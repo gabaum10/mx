@@ -4,6 +4,8 @@ A Swiss army knife for Claude Code and multi-agent toolkits.
 
 A Rust CLI providing encoded git operations, a SurrealDB-backed knowledge graph, session archival, GitHub sync, and emotional state tensors. Designed for use with Claude Code, but works with any multi-agent workflow that needs persistent memory, encoded commits, or session management.
 
+**[Full documentation →](https://coryzibell.github.io/mx/)**
+
 ## Installation
 
 ```bash
@@ -123,25 +125,6 @@ mx sync push owner/repo --dry-run
 mx sync labels owner/repo
 ```
 
-### Environment Doctor
-
-```bash
-mx doctor
-mx doctor --json
-```
-
-## Base-d Encoding
-
-Commits made with `mx commit` look unreadable in raw `git log` output. This is intentional. The commit message is encoded using [base-d](https://crates.io/crates/base-d):
-
-- **Title**: A hash of the diff, encoded through a randomly chosen dictionary. The title is a fingerprint, not human text.
-- **Body**: The actual commit message, compressed and then encoded through another random dictionary.
-- **Footer**: A bracket-delimited line indicating which algorithms and dictionaries were used, e.g. `[sha256:ocean|zstd:forest]`.
-
-If both title and body happen to draw the same dictionary, the footer includes `whoa.` -- a dejavu marker.
-
-Use `mx log` to read commits. Use `git log` if you enjoy puzzles.
-
 ## Configuration
 
 Everything mx writes lives under a single base directory: `$MX_HOME`, default
@@ -159,11 +142,11 @@ Two env vars were removed in the path-alignment refactor (#259):
 
 For the full layout, the complete env-var reference (including SurrealDB
 connection vars, GitHub App auth, and tuning), legacy-fallback behavior, and
-worked examples, see **[docs/paths.md](docs/paths.md)**.
+worked examples, see the **[filesystem layout](https://coryzibell.github.io/mx/paths.html)**.
 
-## Further Documentation
+## Documentation
 
-See the [project wiki](https://github.com/coryzibell/mx/wiki) for full documentation on the memory system, encoding details, tensor schemas, and sync workflows.
+For the complete command reference, configuration guide, and architecture docs, see the [full documentation](https://coryzibell.github.io/mx/).
 
 ## Status
 
