@@ -64,6 +64,9 @@ default = ""
 type = "history"
 max_entries = 50
 
+[keys.ideas]
+type = "list"
+
 [keys.todos]
 type = "list"
 max_entries = 20
@@ -79,7 +82,7 @@ Schema fields:
 / `default`: Optional. Initial value for string and counter types.
 / `min`: Optional. Minimum value for counters (clamped, never errors).
 / `max`: Optional. Maximum value for counters (clamped, never errors).
-/ `max_entries`: Optional. Maximum entries for history and list types. Oldest entries are dropped when exceeded.
+/ `max_entries`: Optional. Maximum entries for history and list types. Oldest entries are dropped when exceeded. Omit to allow unbounded growth.
 / `fields`: Optional. List of valid field names for state types. Writes to unlisted fields are rejected.
 
 === Agent keying
