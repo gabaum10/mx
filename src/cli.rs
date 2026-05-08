@@ -1,5 +1,13 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+fn parse_nonzero_usize(s: &str) -> Result<usize, String> {
+    let n: usize = s.parse().map_err(|e| format!("{e}"))?;
+    if n == 0 {
+        return Err("value must be at least 1".to_string());
+    }
+    Ok(n)
+}
+
 #[derive(Parser)]
 #[command(name = "mx")]
 #[command(about = "Tsunderground CLI - memory, workflow, and identity tooling")]
@@ -1631,31 +1639,35 @@ pub enum DumpFormat {
     Compact,
 }
 
-/// Time-range filters for kv `last`, `search`, and `count` subcommands.
+/// Time-range filters for kv `last`, `search`, `count`, and `random` subcommands.
 ///
-/// All flags are mutually exclusive: `--day`, `--month`, `--week` conflict
-/// with each other and with `--from`/`--to`.
+/// All flags are mutually exclusive: `--day`, `--month`, `--week`, `--since`
+/// conflict with each other and with `--from`/`--to`.
 #[derive(Args, Clone, Default, Debug)]
 pub struct TimeRangeArgs {
     /// Filter by specific day (YYYY-MM-DD, UTC)
-    #[arg(long, conflicts_with_all = ["month", "week", "range_from", "range_to"])]
+    #[arg(long, conflicts_with_all = ["month", "week", "range_from", "range_to", "since"])]
     pub day: Option<String>,
 
     /// Filter by month (YYYY-MM, UTC)
-    #[arg(long, conflicts_with_all = ["day", "week", "range_from", "range_to"])]
+    #[arg(long, conflicts_with_all = ["day", "week", "range_from", "range_to", "since"])]
     pub month: Option<String>,
 
     /// Filter by ISO week (YYYY-Www, e.g. 2026-W17)
-    #[arg(long, conflicts_with_all = ["day", "month", "range_from", "range_to"])]
+    #[arg(long, conflicts_with_all = ["day", "month", "range_from", "range_to", "since"])]
     pub week: Option<String>,
 
     /// Start of date range, inclusive (YYYY-MM-DD, UTC)
-    #[arg(long = "from", conflicts_with_all = ["day", "month", "week"])]
+    #[arg(long = "from", conflicts_with_all = ["day", "month", "week", "since"])]
     pub range_from: Option<String>,
 
     /// End of date range, inclusive (YYYY-MM-DD, UTC)
-    #[arg(long = "to", conflicts_with_all = ["day", "month", "week"])]
+    #[arg(long = "to", conflicts_with_all = ["day", "month", "week", "since"])]
     pub range_to: Option<String>,
+
+    /// Filter entries since a relative time (e.g. 30d, 1w, 2h) or ISO-8601 timestamp
+    #[arg(long, conflicts_with_all = ["day", "month", "week", "range_from", "range_to"])]
+    pub since: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1794,6 +1806,23 @@ pub enum KvCommands {
         query: String,
 
         /// Resolve and display linked memory entry (kn- reference)
+        #[arg(long)]
+        memory: bool,
+
+        #[command(flatten)]
+        time_range: TimeRangeArgs,
+    },
+
+    /// Get N random entries from a history or list
+    Random {
+        /// Key name
+        key: String,
+
+        /// Number of random entries (default: 1)
+        #[arg(long, default_value = "1", value_parser = parse_nonzero_usize)]
+        count: usize,
+
+        /// Resolve and display linked memory entry
         #[arg(long)]
         memory: bool,
 
