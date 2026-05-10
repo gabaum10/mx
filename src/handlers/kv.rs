@@ -13,6 +13,8 @@ fn exit_code_for(err: &KvError) -> Option<i32> {
         KvError::KeyNotFound(_) => Some(kv::EXIT_KEY_NOT_FOUND),
         KvError::TypeMismatch { .. } => Some(kv::EXIT_TYPE_MISMATCH),
         KvError::SchemaMissing(_) => Some(kv::EXIT_SCHEMA_MISSING),
+        KvError::EntryNotFound { .. } => Some(kv::EXIT_INVALID_INPUT),
+        KvError::AmbiguousHash { .. } => Some(kv::EXIT_INVALID_INPUT),
         KvError::Other(_) => None,
     }
 }
@@ -250,9 +252,12 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         }
 
                         if memory {
-                            // Resolve memory for each entry value that looks like a kn- reference
+                            // Resolve per-entry memory pointers
                             for hit in &hits {
-                                if hit.value.starts_with("kn-") {
+                                if let Some(ref mem) = hit.memory {
+                                    print_resolved_memory(mem, verbose);
+                                } else if hit.value.starts_with("kn-") {
+                                    // Legacy: resolve entry value as kn- reference
                                     print_resolved_memory(&hit.value, verbose);
                                 }
                             }
@@ -284,7 +289,27 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             value,
             field_value,
             memory,
+            id,
         } => {
+            // Per-entry memory: --id + --memory targets a specific entry
+            // (clap enforces that --id requires --memory at parse time)
+            if let Some(ref id_str) = id {
+                let id_ref = match parse_single_id(id_str) {
+                    Ok(r) => r,
+                    Err(msg) => {
+                        eprintln!("Error: {}", msg);
+                        return Ok(kv::EXIT_INVALID_INPUT);
+                    }
+                };
+                match store.set_entry_memory(&key, &id_ref, memory) {
+                    Ok(()) => {
+                        store.save()?;
+                        return Ok(kv::EXIT_OK);
+                    }
+                    Err(e) => return handle_kv_err(e),
+                }
+            }
+
             let mut did_something = false;
 
             // Handle the value set (if a value was provided)
@@ -366,7 +391,12 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             Err(e) => handle_kv_err(e),
         },
 
-        KvCommands::Push { key, value, data } => {
+        KvCommands::Push {
+            key,
+            value,
+            data,
+            memory,
+        } => {
             // Parse --data as JSON object if provided
             let parsed_data = match data {
                 Some(ref json_str) => {
@@ -396,7 +426,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 None => None,
             };
 
-            match store.push(&key, &value, parsed_data) {
+            match store.push(&key, &value, parsed_data, memory) {
                 Ok(result) => {
                     store.save()?;
                     println!("kv-{} ({})", result.hash, result.id);
@@ -444,9 +474,21 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 }
             };
             match store.last(&key, count, range.as_ref(), &parsed_where) {
-                Ok(items) => {
-                    for item in &items {
-                        println!("{}", item);
+                Ok(hits) => {
+                    for hit in &hits {
+                        println!(
+                            "{}",
+                            kv::format_entry_line(
+                                hit.id, &hit.hash, &hit.value, &hit.ts, &hit.data
+                            )
+                        );
+                        if memory {
+                            if let Some(ref mem) = hit.memory {
+                                print_resolved_memory(mem, verbose);
+                            } else if hit.value.starts_with("kn-") {
+                                print_resolved_memory(&hit.value, verbose);
+                            }
+                        }
                     }
                     if memory {
                         resolve_memory(&store, &key, verbose);
@@ -473,9 +515,21 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 }
             };
             match store.random(&key, count, range.as_ref(), &parsed_where) {
-                Ok(items) => {
-                    for item in &items {
-                        println!("{}", item);
+                Ok(hits) => {
+                    for hit in &hits {
+                        println!(
+                            "{}",
+                            kv::format_entry_line(
+                                hit.id, &hit.hash, &hit.value, &hit.ts, &hit.data
+                            )
+                        );
+                        if memory {
+                            if let Some(ref mem) = hit.memory {
+                                print_resolved_memory(mem, verbose);
+                            } else if hit.value.starts_with("kn-") {
+                                print_resolved_memory(&hit.value, verbose);
+                            }
+                        }
                     }
                     if memory {
                         resolve_memory(&store, &key, verbose);
@@ -503,6 +557,13 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                             &entry.data
                         )
                     );
+                    if memory {
+                        if let Some(ref mem) = entry.memory {
+                            print_resolved_memory(mem, verbose);
+                        } else if entry.value.starts_with("kn-") {
+                            print_resolved_memory(&entry.value, verbose);
+                        }
+                    }
                 }
                 if memory {
                     resolve_memory(&store, &key, verbose);
@@ -609,6 +670,13 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                                     hit.id, &hit.hash, &hit.value, &hit.ts, &hit.data
                                 )
                             );
+                            if memory {
+                                if let Some(ref mem) = hit.memory {
+                                    print_resolved_memory(mem, verbose);
+                                } else if hit.value.starts_with("kn-") {
+                                    print_resolved_memory(&hit.value, verbose);
+                                }
+                            }
                         }
                         if memory {
                             resolve_memory(&store, &key, verbose);
