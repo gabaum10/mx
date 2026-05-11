@@ -1555,7 +1555,10 @@ mod tests {
                 unreachable!()
             }
 
-            fn sweep_ghost_anchors(&self, _dry_run: bool) -> Result<crate::store::GhostSweepResult> {
+            fn sweep_ghost_anchors(
+                &self,
+                _dry_run: bool,
+            ) -> Result<crate::store::GhostSweepResult> {
                 unreachable!()
             }
         }

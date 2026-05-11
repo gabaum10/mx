@@ -1575,10 +1575,7 @@ impl SurrealDatabase {
     ///   5. If dry_run=false, UPDATE each affected entry to remove ghosts.
     ///
     /// Returns a `GhostSweepResult` with full accounting.
-    pub fn sweep_ghost_anchors(
-        &self,
-        dry_run: bool,
-    ) -> Result<crate::store::GhostSweepResult> {
+    pub fn sweep_ghost_anchors(&self, dry_run: bool) -> Result<crate::store::GhostSweepResult> {
         Self::runtime().block_on(self.sweep_ghost_anchors_async(dry_run))
     }
 
@@ -1692,12 +1689,10 @@ impl SurrealDatabase {
             .collect();
 
         let mut exist_response = with_db!(self, db, {
-            db.query(
-                "SELECT meta::id(id) AS id FROM knowledge WHERE id IN $ids",
-            )
-            .bind(("ids", things))
-            .await
-            .context("Failed to check anchor target existence")
+            db.query("SELECT meta::id(id) AS id FROM knowledge WHERE id IN $ids")
+                .bind(("ids", things))
+                .await
+                .context("Failed to check anchor target existence")
         })?;
 
         let exist_raw: Vec<serde_json::Value> = exist_response

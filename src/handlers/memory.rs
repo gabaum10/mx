@@ -2357,15 +2357,30 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
                 // Human-readable report
-                println!("Ghost anchor sweep{}", if dry_run { " (dry run)" } else { "" });
-                println!("  Entries scanned (with anchors): {}", result.entries_scanned);
+                println!(
+                    "Ghost anchor sweep{}",
+                    if dry_run { " (dry run)" } else { "" }
+                );
+                println!(
+                    "  Entries scanned (with anchors): {}",
+                    result.entries_scanned
+                );
                 println!("  Ghost references found:         {}", result.ghosts_found);
                 if dry_run {
-                    println!("  Ghost references to remove:     {} (dry run, no changes made)", result.ghosts_found);
+                    println!(
+                        "  Ghost references to remove:     {} (dry run, no changes made)",
+                        result.ghosts_found
+                    );
                 } else {
-                    println!("  Ghost references removed:       {}", result.ghosts_removed);
+                    println!(
+                        "  Ghost references removed:       {}",
+                        result.ghosts_removed
+                    );
                 }
-                println!("  Entries affected:               {}", result.affected_entries.len());
+                println!(
+                    "  Entries affected:               {}",
+                    result.affected_entries.len()
+                );
 
                 if !result.affected_entries.is_empty() {
                     println!();
@@ -2390,12 +2405,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
                 if dry_run && result.ghosts_found > 0 {
                     println!();
-                    println!(
-                        "To apply: hearth mx memory sweep-ghosts (without --dry-run)"
-                    );
+                    println!("To apply: hearth mx memory sweep-ghosts (without --dry-run)");
                 } else if !dry_run && result.ghosts_removed > 0 {
                     println!();
-                    println!("Done. {} ghost reference{} removed.",
+                    println!(
+                        "Done. {} ghost reference{} removed.",
                         result.ghosts_removed,
                         if result.ghosts_removed == 1 { "" } else { "s" }
                     );
