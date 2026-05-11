@@ -1734,64 +1734,58 @@ impl SurrealDatabase {
 
         // ----------------------------------------------------------------
         // Phase 5: Remove ghost anchors (unless dry run).
-        // For each affected entry, compute the live anchor list and UPDATE.
+        //
+        // Instead of snapshotting the full anchor list and overwriting it,
+        // we subtract each ghost individually using array::complement inside
+        // the UPDATE. This eliminates the TOCTOU window: if another process
+        // adds a new anchor between Phases 1–4 and this write, that anchor
+        // is never in $ghost_id and therefore survives untouched.
+        //
+        // Per ghost anchor, we issue:
+        //   UPDATE knowledge
+        //   SET anchors = array::complement(anchors, [$ghost_id]),
+        //       updated_at = time::now()
+        //   WHERE meta::id(id) = $entry_id
+        //
+        // array::complement(a, b) returns every element of `a` not present
+        // in `b`, so wrapping the single ghost ID in an array removes exactly
+        // that value without touching anything else in the live array.
         // ----------------------------------------------------------------
         let mut ghosts_removed = 0usize;
 
         if !dry_run && !affected_entries.is_empty() {
-            // Build a lookup from id -> full anchor list for efficient access
-            let anchor_map: std::collections::HashMap<&str, &Vec<String>> = anchored_entries
-                .iter()
-                .map(|e| (e.id.as_str(), &e.anchors))
-                .collect();
-
             for ghost_entry in &affected_entries {
                 let bare_id = ghost_entry
                     .id
                     .strip_prefix("kn-")
                     .unwrap_or(&ghost_entry.id);
 
-                // Build the cleaned anchor list: keep only live anchors.
-                let original = match anchor_map.get(bare_id) {
-                    Some(a) => *a,
-                    None => continue,
-                };
+                for ghost_id in &ghost_entry.ghost_anchors {
+                    let mut update_response = with_db!(self, db, {
+                        db.query(
+                            "UPDATE knowledge
+                             SET anchors = array::complement(anchors, [$ghost_id]),
+                                 updated_at = time::now()
+                             WHERE meta::id(id) = $entry_id",
+                        )
+                        .bind(("entry_id", bare_id.to_string()))
+                        .bind(("ghost_id", ghost_id.clone()))
+                        .await
+                        .context("Failed to remove ghost anchor during sweep")
+                    })?;
 
-                let ghost_set: std::collections::HashSet<&str> = ghost_entry
-                    .ghost_anchors
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect();
+                    let errors = update_response.take_errors();
+                    if !errors.is_empty() {
+                        // Non-fatal: log the failure and continue sweeping.
+                        eprintln!(
+                            "sweep-ghosts: failed to remove anchor {} from {} — {:?}",
+                            ghost_id, ghost_entry.id, errors
+                        );
+                        continue;
+                    }
 
-                let live_anchors: Vec<String> = original
-                    .iter()
-                    .filter(|a| !ghost_set.contains(a.as_str()))
-                    .cloned()
-                    .collect();
-
-                // UPDATE the entry with the cleaned anchor list.
-                let mut update_response = with_db!(self, db, {
-                    db.query(
-                        "UPDATE knowledge SET anchors = $anchors, updated_at = time::now()
-                         WHERE meta::id(id) = $id",
-                    )
-                    .bind(("id", bare_id.to_string()))
-                    .bind(("anchors", live_anchors))
-                    .await
-                    .context("Failed to update anchors during ghost sweep")
-                })?;
-
-                let errors = update_response.take_errors();
-                if !errors.is_empty() {
-                    // Non-fatal: log the failure and continue sweeping.
-                    eprintln!(
-                        "sweep-ghosts: failed to update {} — {:?}",
-                        ghost_entry.id, errors
-                    );
-                    continue;
+                    ghosts_removed += 1;
                 }
-
-                ghosts_removed += ghost_entry.ghost_anchors.len();
             }
         }
 
