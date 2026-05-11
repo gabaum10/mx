@@ -1638,10 +1638,10 @@ impl SurrealDatabase {
                         return Some(s.to_string());
                     }
                     // Object form from Thing deserialization
-                    if let Some(obj) = v.as_object() {
-                        if let Some(id_val) = obj.get("id") {
-                            return id_val.as_str().map(|s| s.to_string());
-                        }
+                    if let Some(obj) = v.as_object()
+                        && let Some(id_val) = obj.get("id")
+                    {
+                        return id_val.as_str().map(|s| s.to_string());
                     }
                     None
                 })
