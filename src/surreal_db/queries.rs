@@ -1558,4 +1558,254 @@ impl SurrealDatabase {
 
         Ok(())
     }
+
+    // =========================================================================
+    // GHOST ANCHOR SWEEP
+    // =========================================================================
+
+    /// Sweep anchor fields for references to deleted/missing entries.
+    ///
+    /// Strategy:
+    ///   1. Fetch all entries that have at least one anchor (no visibility
+    ///      filter — soren-vault has full access and we must repair ALL entries).
+    ///   2. Collect every unique anchor ID referenced across the graph.
+    ///   3. Batch-check which of those IDs actually exist in the knowledge table.
+    ///   4. For each entry, compute the set of ghost anchors (referenced but
+    ///      missing from the existence set).
+    ///   5. If dry_run=false, UPDATE each affected entry to remove ghosts.
+    ///
+    /// Returns a `GhostSweepResult` with full accounting.
+    pub fn sweep_ghost_anchors(
+        &self,
+        dry_run: bool,
+    ) -> Result<crate::store::GhostSweepResult> {
+        Self::runtime().block_on(self.sweep_ghost_anchors_async(dry_run))
+    }
+
+    async fn sweep_ghost_anchors_async(
+        &self,
+        dry_run: bool,
+    ) -> Result<crate::store::GhostSweepResult> {
+        // ----------------------------------------------------------------
+        // Phase 1: Fetch all entries with non-empty anchors.
+        // No visibility filter — this is a maintenance operation running as
+        // soren-vault. We need to repair all entries regardless of visibility.
+        // ----------------------------------------------------------------
+        let mut response = with_db!(self, db, {
+            db.query(
+                "SELECT meta::id(id) AS id, title, anchors
+                 FROM knowledge
+                 WHERE array::len(anchors) > 0
+                 ORDER BY id",
+            )
+            .await
+            .context("Failed to query anchored entries for ghost sweep")
+        })?;
+
+        #[derive(serde::Deserialize)]
+        struct AnchoredRecord {
+            id: String,
+            title: String,
+            #[serde(default)]
+            anchors: Vec<serde_json::Value>,
+        }
+
+        let raw: Vec<serde_json::Value> = response
+            .take(0)
+            .context("Failed to parse anchored entries")?;
+
+        // Parse records, normalizing anchors to plain strings.
+        // Anchors are stored as plain strings in SurrealDB, but may come back
+        // as Thing objects ({ tb: "knowledge", id: "..." }) depending on how
+        // they were originally inserted. Handle both forms.
+        struct ParsedEntry {
+            id: String,
+            title: String,
+            anchors: Vec<String>,
+        }
+
+        let mut anchored_entries: Vec<ParsedEntry> = Vec::new();
+        for obj in raw {
+            let id = obj["id"].as_str().unwrap_or("").to_string();
+            let title = obj["title"].as_str().unwrap_or("").to_string();
+            if id.is_empty() {
+                continue;
+            }
+
+            let anchors_raw = obj["anchors"].as_array().cloned().unwrap_or_default();
+            let anchors: Vec<String> = anchors_raw
+                .into_iter()
+                .filter_map(|v| {
+                    // Plain string form: "kn-abc123" or "abc123"
+                    if let Some(s) = v.as_str() {
+                        return Some(s.to_string());
+                    }
+                    // Object form from Thing deserialization
+                    if let Some(obj) = v.as_object() {
+                        if let Some(id_val) = obj.get("id") {
+                            return id_val.as_str().map(|s| s.to_string());
+                        }
+                    }
+                    None
+                })
+                .collect();
+
+            if !anchors.is_empty() {
+                anchored_entries.push(ParsedEntry { id, title, anchors });
+            }
+        }
+
+        let entries_scanned = anchored_entries.len();
+
+        if entries_scanned == 0 {
+            return Ok(crate::store::GhostSweepResult {
+                entries_scanned: 0,
+                ghosts_found: 0,
+                ghosts_removed: 0,
+                affected_entries: vec![],
+                dry_run,
+            });
+        }
+
+        // ----------------------------------------------------------------
+        // Phase 2: Collect all unique anchor IDs referenced anywhere.
+        // ----------------------------------------------------------------
+        let mut all_referenced: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for entry in &anchored_entries {
+            for anchor in &entry.anchors {
+                // Normalize: strip "kn-" prefix for the existence check since
+                // the knowledge table's meta::id returns the bare suffix.
+                let bare = anchor.strip_prefix("kn-").unwrap_or(anchor).to_string();
+                all_referenced.insert(bare);
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Phase 3: Batch-check existence.
+        // Build Things for all referenced IDs and query which ones exist.
+        // ----------------------------------------------------------------
+        let referenced_vec: Vec<String> = all_referenced.into_iter().collect();
+        let things: Vec<Thing> = referenced_vec
+            .iter()
+            .map(|id| Thing::from(("knowledge", id.as_str())))
+            .collect();
+
+        let mut exist_response = with_db!(self, db, {
+            db.query(
+                "SELECT meta::id(id) AS id FROM knowledge WHERE id IN $ids",
+            )
+            .bind(("ids", things))
+            .await
+            .context("Failed to check anchor target existence")
+        })?;
+
+        let exist_raw: Vec<serde_json::Value> = exist_response
+            .take(0)
+            .context("Failed to parse existence results")?;
+
+        // Build the live-ID set (bare IDs without "kn-" prefix).
+        let live_ids: std::collections::HashSet<String> = exist_raw
+            .into_iter()
+            .filter_map(|v| v["id"].as_str().map(|s| s.to_string()))
+            .collect();
+
+        // ----------------------------------------------------------------
+        // Phase 4: Find ghost anchors per entry.
+        // ----------------------------------------------------------------
+        let mut affected_entries: Vec<crate::store::GhostEntry> = Vec::new();
+        let mut total_ghosts = 0usize;
+
+        for entry in &anchored_entries {
+            let ghost_anchors: Vec<String> = entry
+                .anchors
+                .iter()
+                .filter(|anchor| {
+                    let bare = anchor.strip_prefix("kn-").unwrap_or(anchor);
+                    !live_ids.contains(bare)
+                })
+                .cloned()
+                .collect();
+
+            if !ghost_anchors.is_empty() {
+                total_ghosts += ghost_anchors.len();
+                affected_entries.push(crate::store::GhostEntry {
+                    id: format!("kn-{}", entry.id),
+                    title: entry.title.clone(),
+                    ghost_anchors,
+                });
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Phase 5: Remove ghost anchors (unless dry run).
+        // For each affected entry, compute the live anchor list and UPDATE.
+        // ----------------------------------------------------------------
+        let mut ghosts_removed = 0usize;
+
+        if !dry_run && !affected_entries.is_empty() {
+            // Build a lookup from id -> full anchor list for efficient access
+            let anchor_map: std::collections::HashMap<&str, &Vec<String>> = anchored_entries
+                .iter()
+                .map(|e| (e.id.as_str(), &e.anchors))
+                .collect();
+
+            for ghost_entry in &affected_entries {
+                let bare_id = ghost_entry
+                    .id
+                    .strip_prefix("kn-")
+                    .unwrap_or(&ghost_entry.id);
+
+                // Build the cleaned anchor list: keep only live anchors.
+                let original = match anchor_map.get(bare_id) {
+                    Some(a) => *a,
+                    None => continue,
+                };
+
+                let ghost_set: std::collections::HashSet<&str> = ghost_entry
+                    .ghost_anchors
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect();
+
+                let live_anchors: Vec<String> = original
+                    .iter()
+                    .filter(|a| !ghost_set.contains(a.as_str()))
+                    .cloned()
+                    .collect();
+
+                // UPDATE the entry with the cleaned anchor list.
+                let mut update_response = with_db!(self, db, {
+                    db.query(
+                        "UPDATE knowledge SET anchors = $anchors, updated_at = time::now()
+                         WHERE meta::id(id) = $id",
+                    )
+                    .bind(("id", bare_id.to_string()))
+                    .bind(("anchors", live_anchors))
+                    .await
+                    .context("Failed to update anchors during ghost sweep")
+                })?;
+
+                let errors = update_response.take_errors();
+                if !errors.is_empty() {
+                    // Non-fatal: log the failure and continue sweeping.
+                    eprintln!(
+                        "sweep-ghosts: failed to update {} — {:?}",
+                        ghost_entry.id, errors
+                    );
+                    continue;
+                }
+
+                ghosts_removed += ghost_entry.ghost_anchors.len();
+            }
+        }
+
+        Ok(crate::store::GhostSweepResult {
+            entries_scanned,
+            ghosts_found: total_ghosts,
+            ghosts_removed,
+            affected_entries,
+            dry_run,
+        })
+    }
 }
