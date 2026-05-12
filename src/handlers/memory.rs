@@ -2350,7 +2350,9 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if dry_run {
                 eprintln!("sweep-ghosts: DRY RUN — no changes will be made");
             } else {
-                eprintln!("sweep-ghosts: WARNING — this will modify memory data. Use --dry-run to preview first.");
+                eprintln!(
+                    "sweep-ghosts: WARNING — this will modify memory data. Use --dry-run to preview first."
+                );
             }
 
             let result = db.sweep_ghost_anchors(dry_run)?;

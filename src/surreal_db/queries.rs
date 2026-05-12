@@ -189,8 +189,7 @@ impl SurrealDatabase {
 
         // Layer 2: Recent blooms (last N days)
         // Exclude IDs already in core, use remaining quota
-        let core_ids: HashSet<String> =
-            core.iter().map(|e| e.id.clone()).collect();
+        let core_ids: HashSet<String> = core.iter().map(|e| e.id.clone()).collect();
 
         let all_recent = self.query_recent_blooms(ctx, remaining * 2, days).await?;
         let recent: Vec<_> = all_recent
@@ -1661,8 +1660,7 @@ impl SurrealDatabase {
         // ----------------------------------------------------------------
         // Phase 2: Collect all unique anchor IDs referenced anywhere.
         // ----------------------------------------------------------------
-        let mut all_referenced: HashSet<String> =
-            HashSet::new();
+        let mut all_referenced: HashSet<String> = HashSet::new();
         for entry in &anchored_entries {
             for anchor in &entry.anchors {
                 // Normalize: strip "kn-" prefix for the existence check since

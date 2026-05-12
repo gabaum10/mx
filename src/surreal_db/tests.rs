@@ -1331,7 +1331,10 @@ fn test_detect_ghosts_no_false_positives() {
     let anchors = vec!["aaa".to_string(), "bbb".to_string()];
 
     let ghosts = queries::detect_ghosts(&anchors, &live_ids);
-    assert!(ghosts.is_empty(), "No ghosts should be detected when all anchors exist");
+    assert!(
+        ghosts.is_empty(),
+        "No ghosts should be detected when all anchors exist"
+    );
 }
 
 #[test]
@@ -1353,21 +1356,22 @@ fn test_detect_ghosts_handles_kn_prefix() {
     let anchors = vec!["kn-aaa".to_string(), "kn-bbb".to_string()];
 
     let ghosts = queries::detect_ghosts(&anchors, &live_ids);
-    assert_eq!(ghosts, vec!["kn-bbb"], "kn-aaa maps to live 'aaa', kn-bbb is a ghost");
+    assert_eq!(
+        ghosts,
+        vec!["kn-bbb"],
+        "kn-aaa maps to live 'aaa', kn-bbb is a ghost"
+    );
 }
 
 #[test]
 fn test_detect_ghosts_mixed_prefix_and_bare() {
     // Mix of prefixed and bare anchors. Both forms should resolve correctly.
-    let live_ids: HashSet<String> = ["aaa", "bbb"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let live_ids: HashSet<String> = ["aaa", "bbb"].iter().map(|s| s.to_string()).collect();
     let anchors = vec![
-        "kn-aaa".to_string(),  // maps to live "aaa" — not a ghost
-        "bbb".to_string(),     // maps to live "bbb" — not a ghost
-        "ccc".to_string(),     // not in live set — ghost
-        "kn-ddd".to_string(),  // maps to bare "ddd", not in live set — ghost
+        "kn-aaa".to_string(), // maps to live "aaa" — not a ghost
+        "bbb".to_string(),    // maps to live "bbb" — not a ghost
+        "ccc".to_string(),    // not in live set — ghost
+        "kn-ddd".to_string(), // maps to bare "ddd", not in live set — ghost
     ];
 
     let ghosts = queries::detect_ghosts(&anchors, &live_ids);
@@ -1403,10 +1407,16 @@ fn test_sweep_ghost_anchors_dry_run_does_not_modify() {
     let result = db.sweep_ghost_anchors(true).unwrap();
 
     assert_eq!(result.ghosts_found, 1, "Should detect one ghost anchor");
-    assert_eq!(result.ghosts_removed, 0, "Dry run should not remove anything");
+    assert_eq!(
+        result.ghosts_removed, 0,
+        "Dry run should not remove anything"
+    );
     assert!(result.dry_run);
     assert_eq!(result.affected_entries.len(), 1);
-    assert_eq!(result.affected_entries[0].ghost_anchors, vec!["kn-sweep-ghost"]);
+    assert_eq!(
+        result.affected_entries[0].ghost_anchors,
+        vec!["kn-sweep-ghost"]
+    );
 
     // Verify anchors were NOT modified
     let ctx = crate::store::AgentContext::public_only();
@@ -1424,7 +1434,10 @@ fn test_sweep_ghost_anchors_removes_ghosts() {
 
     // Create entry with one live and one ghost anchor.
     let mut entry_a = make_test_entry("kn-sweep-rm-a", 5, 0.0);
-    entry_a.anchors = vec!["kn-sweep-rm-live".to_string(), "kn-sweep-rm-dead".to_string()];
+    entry_a.anchors = vec![
+        "kn-sweep-rm-live".to_string(),
+        "kn-sweep-rm-dead".to_string(),
+    ];
     db.upsert_knowledge(&entry_a).unwrap();
 
     let live_entry = make_test_entry("kn-sweep-rm-live", 3, 0.0);
