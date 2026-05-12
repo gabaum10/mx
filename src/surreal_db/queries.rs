@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::{Context, Result};
 use chrono::Utc;
 use surrealdb::sql::Thing;
@@ -187,7 +189,7 @@ impl SurrealDatabase {
 
         // Layer 2: Recent blooms (last N days)
         // Exclude IDs already in core, use remaining quota
-        let core_ids: std::collections::HashSet<String> =
+        let core_ids: HashSet<String> =
             core.iter().map(|e| e.id.clone()).collect();
 
         let all_recent = self.query_recent_blooms(ctx, remaining * 2, days).await?;
@@ -1599,14 +1601,6 @@ impl SurrealDatabase {
             .context("Failed to query anchored entries for ghost sweep")
         })?;
 
-        #[derive(serde::Deserialize)]
-        struct AnchoredRecord {
-            id: String,
-            title: String,
-            #[serde(default)]
-            anchors: Vec<serde_json::Value>,
-        }
-
         let raw: Vec<serde_json::Value> = response
             .take(0)
             .context("Failed to parse anchored entries")?;
@@ -1667,8 +1661,8 @@ impl SurrealDatabase {
         // ----------------------------------------------------------------
         // Phase 2: Collect all unique anchor IDs referenced anywhere.
         // ----------------------------------------------------------------
-        let mut all_referenced: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut all_referenced: HashSet<String> =
+            HashSet::new();
         for entry in &anchored_entries {
             for anchor in &entry.anchors {
                 // Normalize: strip "kn-" prefix for the existence check since
@@ -1700,27 +1694,20 @@ impl SurrealDatabase {
             .context("Failed to parse existence results")?;
 
         // Build the live-ID set (bare IDs without "kn-" prefix).
-        let live_ids: std::collections::HashSet<String> = exist_raw
+        let live_ids: HashSet<String> = exist_raw
             .into_iter()
             .filter_map(|v| v["id"].as_str().map(|s| s.to_string()))
             .collect();
 
         // ----------------------------------------------------------------
         // Phase 4: Find ghost anchors per entry.
+        // Uses the extracted `detect_ghosts` pure function for testability.
         // ----------------------------------------------------------------
         let mut affected_entries: Vec<crate::store::GhostEntry> = Vec::new();
         let mut total_ghosts = 0usize;
 
         for entry in &anchored_entries {
-            let ghost_anchors: Vec<String> = entry
-                .anchors
-                .iter()
-                .filter(|anchor| {
-                    let bare = anchor.strip_prefix("kn-").unwrap_or(anchor);
-                    !live_ids.contains(bare)
-                })
-                .cloned()
-                .collect();
+            let ghost_anchors = detect_ghosts(&entry.anchors, &live_ids);
 
             if !ghost_anchors.is_empty() {
                 total_ghosts += ghost_anchors.len();
@@ -1736,20 +1723,20 @@ impl SurrealDatabase {
         // Phase 5: Remove ghost anchors (unless dry run).
         //
         // Instead of snapshotting the full anchor list and overwriting it,
-        // we subtract each ghost individually using array::complement inside
-        // the UPDATE. This eliminates the TOCTOU window: if another process
-        // adds a new anchor between Phases 1–4 and this write, that anchor
-        // is never in $ghost_id and therefore survives untouched.
+        // we subtract ghosts using array::complement inside the UPDATE.
+        // This eliminates the TOCTOU window: if another process adds a new
+        // anchor between Phases 1-4 and this write, that anchor is never in
+        // $ghost_ids and therefore survives untouched.
         //
-        // Per ghost anchor, we issue:
+        // All ghosts for a single entry are batched into one query:
         //   UPDATE knowledge
-        //   SET anchors = array::complement(anchors, [$ghost_id]),
+        //   SET anchors = array::complement(anchors, $ghost_ids),
         //       updated_at = time::now()
         //   WHERE meta::id(id) = $entry_id
         //
         // array::complement(a, b) returns every element of `a` not present
-        // in `b`, so wrapping the single ghost ID in an array removes exactly
-        // that value without touching anything else in the live array.
+        // in `b`, so passing the full ghost vec removes exactly those values
+        // without touching anything else in the live array.
         // ----------------------------------------------------------------
         let mut ghosts_removed = 0usize;
 
@@ -1760,32 +1747,33 @@ impl SurrealDatabase {
                     .strip_prefix("kn-")
                     .unwrap_or(&ghost_entry.id);
 
-                for ghost_id in &ghost_entry.ghost_anchors {
-                    let mut update_response = with_db!(self, db, {
-                        db.query(
-                            "UPDATE knowledge
-                             SET anchors = array::complement(anchors, [$ghost_id]),
-                                 updated_at = time::now()
-                             WHERE meta::id(id) = $entry_id",
-                        )
-                        .bind(("entry_id", bare_id.to_string()))
-                        .bind(("ghost_id", ghost_id.clone()))
-                        .await
-                        .context("Failed to remove ghost anchor during sweep")
-                    })?;
+                let ghost_ids = ghost_entry.ghost_anchors.clone();
+                let ghost_count = ghost_ids.len();
 
-                    let errors = update_response.take_errors();
-                    if !errors.is_empty() {
-                        // Non-fatal: log the failure and continue sweeping.
-                        eprintln!(
-                            "sweep-ghosts: failed to remove anchor {} from {} — {:?}",
-                            ghost_id, ghost_entry.id, errors
-                        );
-                        continue;
-                    }
+                let mut update_response = with_db!(self, db, {
+                    db.query(
+                        "UPDATE knowledge
+                         SET anchors = array::complement(anchors, $ghost_ids),
+                             updated_at = time::now()
+                         WHERE meta::id(id) = $entry_id",
+                    )
+                    .bind(("entry_id", bare_id.to_string()))
+                    .bind(("ghost_ids", ghost_ids))
+                    .await
+                    .context("Failed to remove ghost anchors during sweep")
+                })?;
 
-                    ghosts_removed += 1;
+                let errors = update_response.take_errors();
+                if !errors.is_empty() {
+                    // Non-fatal: log the failure and continue sweeping.
+                    eprintln!(
+                        "sweep-ghosts: failed to remove {} ghost anchor(s) from {} — {:?}",
+                        ghost_count, ghost_entry.id, errors
+                    );
+                    continue;
                 }
+
+                ghosts_removed += ghost_count;
             }
         }
 
@@ -1797,4 +1785,27 @@ impl SurrealDatabase {
             dry_run,
         })
     }
+}
+
+// =========================================================================
+// GHOST DETECTION — Pure function for testability
+// =========================================================================
+
+/// Identify ghost anchors for a single entry.
+///
+/// An anchor is a "ghost" if its bare ID (with "kn-" prefix stripped) does not
+/// appear in `live_ids`. Returns the list of ghost anchor strings (preserving
+/// their original form, including any "kn-" prefix they may carry).
+///
+/// This is the core detection logic used by `sweep_ghost_anchors_async`, extracted
+/// as a pure function so it can be tested without a database connection.
+pub(crate) fn detect_ghosts(anchors: &[String], live_ids: &HashSet<String>) -> Vec<String> {
+    anchors
+        .iter()
+        .filter(|anchor| {
+            let bare = anchor.strip_prefix("kn-").unwrap_or(anchor);
+            !live_ids.contains(bare)
+        })
+        .cloned()
+        .collect()
 }

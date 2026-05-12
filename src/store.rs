@@ -454,7 +454,10 @@ pub struct GhostSweepResult {
     pub entries_scanned: usize,
     /// Total ghost references found
     pub ghosts_found: usize,
-    /// Total ghost references removed (0 when dry_run=true)
+    /// Total ghost references removal was attempted for (0 when dry_run=true).
+    /// This counts attempted removals, not confirmed removals — if a database
+    /// update fails for a particular entry, the ghost count for that entry is
+    /// still included here but the anchors may not have been removed.
     pub ghosts_removed: usize,
     /// Entries that had at least one ghost anchor (id + count of ghosts)
     pub affected_entries: Vec<GhostEntry>,
