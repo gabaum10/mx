@@ -341,16 +341,19 @@ pub(crate) fn archive_session(
         let images_dir = archive_dir.join("images");
         fs::create_dir_all(&images_dir)?;
 
-        let (_stripped_content, mut all_images) = extract_images_from_jsonl(&content, &images_dir)?;
+        let (_stripped_content, mut all_images, session_skipped) =
+            extract_images_from_jsonl(&content, &images_dir)?;
+        let mut total_skipped = session_skipped;
 
         // Extract images from agent files too (no file copy in clean mode)
         if !agents.is_empty() {
             for agent in &agents {
                 let source_path = PathBuf::from(&agent.id);
                 if let Ok(agent_content) = fs::read_to_string(&source_path)
-                    && let Ok((_modified_agent_content, agent_images)) =
+                    && let Ok((_modified_agent_content, agent_images, agent_skipped)) =
                         extract_images_from_jsonl(&agent_content, &images_dir)
                 {
+                    total_skipped += agent_skipped;
                     for img in agent_images {
                         if !all_images.iter().any(|existing| existing.hash == img.hash) {
                             all_images.push(img);
@@ -433,6 +436,9 @@ pub(crate) fn archive_session(
 
         println!("Archived session (clean) to: {}", archive_dir.display());
         println!("  Messages: {}", message_count);
+        if total_skipped > 0 {
+            println!("  Skipped invalid lines: {}", total_skipped);
+        }
         println!("  Images: {}", image_count);
         println!("  Size: {} KB", archive_size_bytes / 1024);
         println!("  conversation.md written");
@@ -447,8 +453,9 @@ pub(crate) fn archive_session(
 
     // Extract images from session file and save modified content
     let session_content = fs::read_to_string(session_path)?;
-    let (modified_session_content, mut all_images) =
+    let (modified_session_content, mut all_images, session_skipped) =
         extract_images_from_jsonl(&session_content, &images_dir)?;
+    let mut total_skipped = session_skipped;
 
     let dest_session = archive_dir.join("session.jsonl");
     fs::write(&dest_session, modified_session_content)?;
@@ -467,8 +474,9 @@ pub(crate) fn archive_session(
 
             // Extract images from agent file
             let agent_content = fs::read_to_string(&source_path)?;
-            let (modified_agent_content, agent_images) =
+            let (modified_agent_content, agent_images, agent_skipped) =
                 extract_images_from_jsonl(&agent_content, &images_dir)?;
+            total_skipped += agent_skipped;
 
             // Merge agent images with all_images (deduplication handled by hash check)
             for img in agent_images {
@@ -530,6 +538,9 @@ pub(crate) fn archive_session(
 
     println!("Archived session to: {}", archive_dir.display());
     println!("  Messages: {}", message_count);
+    if total_skipped > 0 {
+        println!("  Skipped invalid lines: {}", total_skipped);
+    }
     println!("  Agents: {}", agents.len());
     println!("  Images: {}", image_count);
     println!("  Size: {} KB", size_bytes / 1024);

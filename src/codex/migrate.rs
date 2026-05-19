@@ -113,7 +113,7 @@ pub(crate) fn migrate_archives(
 
             // Extract images from session.jsonl
             let session_content = fs::read_to_string(&session_file)?;
-            let (modified_session_content, mut all_images) =
+            let (modified_session_content, mut all_images, _) =
                 extract_images_from_jsonl(&session_content, &images_dir)?;
 
             // Write back modified session.jsonl
@@ -140,7 +140,7 @@ pub(crate) fn migrate_archives(
 
                         // Extract images from agent file
                         let agent_content = fs::read_to_string(&path)?;
-                        let (modified_agent_content, agent_images) =
+                        let (modified_agent_content, agent_images, _) =
                             extract_images_from_jsonl(&agent_content, &images_dir)?;
 
                         // Merge agent images (deduplicate)
